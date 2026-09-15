@@ -49,9 +49,11 @@ rather than a page of copy-paste `postMessage`.
 
 ## Try it
 
-A complete example application lives in [`example/`](example) — a pretend
-collections tool with a case list, a dial button per row, and a live log of
-everything the dialer sends back.
+[**Open the live example**](https://gosymbo.github.io/symbo-dialer-sdk/example/)
+— a pretend collections tool with a case list, a dial button per row, and a live
+log of everything the dialer sends back.
+
+The source is in [`example/`](example), and it runs locally too:
 
 ```bash
 npm install
@@ -148,31 +150,21 @@ The npm package ships plain ESM from `src/`. There is no build step for the
 module entry — `dist/` exists only for script-tag users, and is rebuilt
 automatically on publish.
 
-## The contract is declared twice
+## Protocol version
 
-This package does not depend on the Symbo application, which is what lets it
-live in its own repository. The cost is that the message names exist in both
-places and must agree exactly. Drift is silent — both sides keep working while a
-partner stops receiving an event nobody noticed was renamed.
-
-`test/protocol.test.js` pins the contract here against a written-out literal,
-and symbo-ui has a matching test with the same literal. Changing the protocol on
-either side fails that side's build until the literal is updated, which is the
-moment you are meant to remember the other repository exists.
-
-Bump `PROTOCOL_VERSION` when a message is removed or renamed, or when a payload
-field changes meaning. Adding an event or an optional field is additive and does
-not need one.
+`PROTOCOL_VERSION` changes when a message is removed or renamed, or when a
+payload field changes meaning. Adding an event or an optional field is additive
+and does not change it — so new events can appear in a release without breaking
+an integration that ignores them.
 
 ## Status
 
-Pre-release. Two things are not done:
+Pre-release, and not yet on npm.
 
-- **Not published.** The `@symbo` npm scope needs claiming.
-- **Symbo needs the matching fix.** The embed surface is live, but the
-  handshake only completes on an environment carrying the fix for it. Against
-  one that doesn't, the dialer renders in the frame, never answers, and
-  `mount()` ends in `MOUNT_TIMEOUT`. The bundled stub works either way.
+The handshake completes only against a Symbo environment carrying the matching
+support. Against one that doesn't, the dialer renders in the frame, never
+answers, and `mount()` ends in `MOUNT_TIMEOUT`. The bundled stub works either
+way, so you can build against the protocol before that lands.
 
 ## Licence
 
