@@ -2,8 +2,8 @@
 
 Embed the Symbo dialer in your own application.
 
-> **Pre-release.** Not published to npm yet, and the embed surface is not
-> deployed on any Symbo environment. See [Status](#status).
+> **Early release.** `mount()` needs a Symbo environment carrying the matching
+> support — see [Status](#status).
 
 ```bash
 npm install @symbo/dialer-embed
@@ -159,12 +159,15 @@ an integration that ignores them.
 
 ## Status
 
-Pre-release, and not yet on npm.
+Early. `PROTOCOL_VERSION` is 2, and while the message set has held since, this
+is a 0.x package and the surface can still move — pin an exact version if that
+matters to you.
 
-The handshake completes only against a Symbo environment carrying the matching
+`mount()` completes only against a Symbo environment carrying the matching
 support. Against one that doesn't, the dialer renders in the frame, never
-answers, and `mount()` ends in `MOUNT_TIMEOUT`. The bundled stub works either
-way, so you can build against the protocol before that lands.
+answers, and ends in `MOUNT_TIMEOUT`. The bundled stub plays the Symbo side of
+the protocol, so the whole integration can be built and tested before that
+lands.
 
 ## Licence
 
