@@ -1,0 +1,54 @@
+{
+  "name": "@symbo/dialer-embed",
+  "version": "0.1.0",
+  "description": "Embed the Symbo dialer in your own application.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "unpkg": "./dist/symbo-dialer.min.js",
+  "jsdelivr": "./dist/symbo-dialer.min.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gosymbo/symbo-dialer-sdk.git"
+  },
+  "homepage": "https://github.com/gosymbo/symbo-dialer-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/gosymbo/symbo-dialer-sdk/issues"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "demo": "npm run serve",
+    "serve": "npx --yes http-server -p 3000 -c-1 -o /example/",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "vitest": "^3.2.7"
+  },
+  "keywords": [
+    "symbo",
+    "dialer",
+    "embed",
+    "telephony",
+    "webrtc"
+  ]
+}
