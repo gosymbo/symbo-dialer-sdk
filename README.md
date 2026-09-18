@@ -247,7 +247,7 @@ your records on `prospectId`; join to Symbo's call webhooks on `callId`.
 | You call | What happens |
 | --- | --- |
 | `session.pause()` | Lines that are ringing are hung up (they get the cancelled default outcome). A connected call is **never** cut. The engine stays paused after the call until you resume |
-| `session.resume()` | Dials the next round. Refused with `OUTCOME_PENDING` while a call is waiting for its outcome |
+| `session.resume()` | Dials the next round. Refused with `OUTCOME_PENDING` while a call is waiting for its outcome, and with `CALL_IN_PROGRESS` while a contact is still on the line (hang up or `skipCurrent()` first) |
 | `session.saveOutcome({ …, then })` | Saves the outcome and note on the call, then `'resume'` (next round), `'pause'` (stay paused) or `'end'` |
 | `session.skipCurrent()` | Hangs up the connected call and skips its outcome |
 | `hangUp()` | Hangs up the connected call (→ `session.wrap`), or cancels ringing lines |
