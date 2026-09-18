@@ -407,7 +407,7 @@ class SymboDialerClient {
     // dropped, the loop repeats every HELLO_RETRY_MS, and startSayingHello()
     // clears its own timer before arming the next, so the `load` call above
     // cannot leave a second one running.
-    this.startSayingHello()
+    this.startSayingHello({ immediate: false })
 
     return this.mountPromise
   }
@@ -455,7 +455,7 @@ class SymboDialerClient {
 
   /* ------------------------------------------------------------- handshake */
 
-  startSayingHello() {
+  startSayingHello({ immediate = true } = {}) {
     const hello = () =>
       this.iframe?.contentWindow?.postMessage(
         {
@@ -471,7 +471,13 @@ class SymboDialerClient {
     // the one created after it running.
     this.stopSayingHello()
     this.helloTimer = setInterval(hello, HELLO_RETRY_MS)
-    hello()
+    // Skipped only by the mount-time call. The frame is still on about:blank
+    // there, whose origin is the string "null", so a post to the origin we
+    // pinned is refused and the browser logs a warning the partner cannot
+    // silence. Dropping just the leading hello keeps the safety net — the
+    // interval still fires if `load` never does — without that noise in
+    // every partner's console.
+    if (immediate) hello()
   }
 
   stopSayingHello() {
