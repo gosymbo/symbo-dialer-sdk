@@ -428,9 +428,12 @@ class SymboDialerClient {
         this.origin
       )
 
-    hello()
+    // Arm the repeat before the first hello: a frame that answers on the
+    // spot would otherwise stop a timer that does not exist yet and leave
+    // the one created after it running.
     this.stopSayingHello()
     this.helloTimer = setInterval(hello, HELLO_RETRY_MS)
+    hello()
   }
 
   stopSayingHello() {

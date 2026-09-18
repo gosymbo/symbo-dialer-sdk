@@ -334,6 +334,27 @@ describe('create and mount', () => {
     expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
   })
 
+  it('does not leave the hello loop running when the frame answers on the spot', async () => {
+    const dialer = SymboDialer.create({
+      container: env.makeContainer(),
+      appUrl: APP_URL,
+    })
+    const mounting = dialer.mount()
+    const symbo = fakeSymbo(env, dialer)
+
+    // A frame whose listener is already attached replies inside the same
+    // tick as the hello it heard.
+    dialer.iframe.contentWindow.postMessage = (data, targetOrigin) => {
+      dialer.iframe.posted.push({ data, targetOrigin })
+      if (data.type === COMMANDS.HELLO) symbo.ready()
+    }
+    symbo.load()
+    await mounting
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+  })
+
   it('stops the hello loop on auth.required too, and restarts it when the frame reloads', async () => {
     const dialer = SymboDialer.create({
       container: env.makeContainer(),
