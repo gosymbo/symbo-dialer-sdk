@@ -306,7 +306,7 @@ describe('create and mount', () => {
     expect(dialer.user).toEqual({ id: 'u-1' })
   })
 
-  it('says hello on load, pinned to the origin, and repeats until Symbo answers', async () => {
+  it('says hello once the frame is in the document, pinned to the origin, and repeats until Symbo answers', async () => {
     const dialer = SymboDialer.create({
       container: env.makeContainer(),
       appUrl: APP_URL,
@@ -314,9 +314,8 @@ describe('create and mount', () => {
     const mounting = dialer.mount()
     const symbo = fakeSymbo(env, dialer)
 
-    expect(symbo.posted()).toHaveLength(0)
-    symbo.load()
-
+    // Without waiting for `load`: the frame is appended, so we are already
+    // asking.
     expect(symbo.posted()).toHaveLength(1)
     expect(symbo.posted()[0].targetOrigin).toBe(APP_URL)
     expect(symbo.posted()[0].data).toEqual({
@@ -325,13 +324,17 @@ describe('create and mount', () => {
       protocolVersion: PROTOCOL_VERSION,
     })
 
+    // `load` restarts the loop rather than adding a second one.
+    symbo.load()
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
+
     await vi.advanceTimersByTimeAsync(1000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(4)
 
     symbo.ready()
     await mounting
     await vi.advanceTimersByTimeAsync(2000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(4)
   })
 
   it('does not leave the hello loop running when the frame answers on the spot', async () => {
@@ -343,7 +346,9 @@ describe('create and mount', () => {
     const symbo = fakeSymbo(env, dialer)
 
     // A frame whose listener is already attached replies inside the same
-    // tick as the hello it heard.
+    // tick as the hello it heard. The hello posted at mount reached a frame
+    // that was not listening yet and went nowhere, which is the second one
+    // counted below.
     dialer.iframe.contentWindow.postMessage = (data, targetOrigin) => {
       dialer.iframe.posted.push({ data, targetOrigin })
       if (data.type === COMMANDS.HELLO) symbo.ready()
@@ -352,7 +357,7 @@ describe('create and mount', () => {
     await mounting
 
     await vi.advanceTimersByTimeAsync(3000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
   })
 
   it('stops the hello loop on auth.required too, and restarts it when the frame reloads', async () => {
@@ -363,18 +368,84 @@ describe('create and mount', () => {
     dialer.mount()
     const symbo = fakeSymbo(env, dialer)
 
+    // One hello at mount, one more when `load` restarts the loop, then
+    // silence once the frame has answered.
     symbo.load()
     symbo.authRequired()
     await vi.advanceTimersByTimeAsync(2000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
 
     // The in-frame sign-in reloads the frame: load fires again, we must ask
     // again, and an auth.required repeat must stop us again.
     symbo.load()
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
     symbo.authRequired()
     await vi.advanceTimersByTimeAsync(2000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+  })
+
+  // A frame whose document never settles never fires `load`: one media error
+  // handler that reassigns a source it can never fetch, and re-fires on the
+  // error that reassignment causes, is enough. While the handshake waited on
+  // that event, such a frame was never sent a single hello, and the partner
+  // sat at MOUNT_TIMEOUT for the whole budget with nothing naming the cause.
+  it('keeps saying hello to a frame that never fires load, and still reaches ready', async () => {
+    const dialer = SymboDialer.create({
+      container: env.makeContainer(),
+      appUrl: APP_URL,
+      mountTimeoutMs: 5000,
+    })
+    const mounting = dialer.mount()
+    const symbo = fakeSymbo(env, dialer)
+    const rejected = vi.fn()
+    mounting.catch(rejected)
+
+    // Note what this test never calls: symbo.load().
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+    expect(symbo.posted()[0].targetOrigin).toBe(APP_URL)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+
+    // The frame's listener attaches on its own schedule and answers the
+    // hello it eventually hears.
+    symbo.ready()
+    expect(await mounting).toBe(dialer)
+    expect(dialer.ready).toBe(true)
+
+    // Answered, so the loop stops and the mount timeout never fires.
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+    expect(rejected).not.toHaveBeenCalled()
+  })
+
+  it('reaches auth.required on a frame that never fires load, and waits out the sign-in', async () => {
+    const dialer = SymboDialer.create({
+      container: env.makeContainer(),
+      appUrl: APP_URL,
+      mountTimeoutMs: 5000,
+    })
+    const mounting = dialer.mount()
+    const symbo = fakeSymbo(env, dialer)
+    const rejected = vi.fn()
+    mounting.catch(rejected)
+    const authRequired = vi.fn()
+    dialer.on('auth.required', authRequired)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+
+    symbo.authRequired('https://app.symbo.ai/login?guest=abc')
+    expect(authRequired).toHaveBeenCalledTimes(1)
+    expect(dialer.loginUrl).toBe('https://app.symbo.ai/login?guest=abc')
+
+    // Contact stops the clock, and the rep can take as long as they like.
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(rejected).not.toHaveBeenCalled()
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+
+    symbo.ready()
+    expect(await mounting).toBe(dialer)
   })
 
   it('rejects with MOUNT_TIMEOUT when the frame never answers', async () => {
@@ -400,7 +471,7 @@ describe('create and mount', () => {
     expect(err.message).toContain(APP_URL)
   })
 
-  it('takes a refused handshake as contact: one hello, and mount rejects with the code', async () => {
+  it('takes a refused handshake as contact: no more hellos, and mount rejects with the code', async () => {
     const dialer = SymboDialer.create({
       container: env.makeContainer(),
       appUrl: APP_URL,
@@ -429,7 +500,9 @@ describe('create and mount', () => {
     })
 
     await vi.advanceTimersByTimeAsync(10000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+    // The hello at mount and the one `load` restarted, and nothing after the
+    // refusal.
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
     expect(errors).toHaveBeenCalledTimes(1)
     expect(warnings).toHaveBeenCalledTimes(1)
     expect(dialer.warnings.get(ERRORS.ORIGIN_NOT_ALLOWED)).toBe(

@@ -203,9 +203,10 @@ const DEFAULT_MOUNT_TIMEOUT_MS = 30000
 // replies to it, and a hello that arrives before its listener is attached is
 // dropped with nothing to retry it. The iframe's `load` event is not a reliable
 // moment to speak — it fires when the document is done, which can beat the
-// application's own startup on a cold cache. So keep saying it until we are
-// heard, and stop the moment we are. The frame reloads itself after an
-// in-frame sign-in, which fires `load` again and restarts the loop.
+// application's own startup on a cold cache, and a document that never settles
+// never fires it at all (see mount()). So keep saying it until we are heard,
+// and stop the moment we are. The frame reloads itself after an in-frame
+// sign-in, which fires `load` again and restarts the loop.
 const HELLO_RETRY_MS = 400
 
 // The public event names, minus the namespace: callers write
@@ -391,8 +392,22 @@ class SymboDialerClient {
     })
 
     window.addEventListener('message', this.handleMessage)
+    // `load` is the natural moment to (re)start asking: it fires when the
+    // frame's document is done, and again after an in-frame sign-in reloads
+    // it.
     iframe.addEventListener('load', () => this.startSayingHello())
     this.container.appendChild(iframe)
+
+    // But do not depend on it. A document that never settles never fires
+    // `load` at all — one runaway media error handler retrying a source it
+    // can never fetch is enough — and the handshake would then never start:
+    // no hello, no answer, and the partner left with MOUNT_TIMEOUT and
+    // nothing naming the cause. The frame is in the document now, so start
+    // now. It costs nothing: a hello posted before the frame is listening is
+    // dropped, the loop repeats every HELLO_RETRY_MS, and startSayingHello()
+    // clears its own timer before arming the next, so the `load` call above
+    // cannot leave a second one running.
+    this.startSayingHello()
 
     return this.mountPromise
   }
@@ -400,6 +415,8 @@ class SymboDialerClient {
   onMountTimeout() {
     this.mountTimer = null
     this.stopSayingHello()
+    // We have been saying hello since the frame entered the document, so
+    // this is the frame never answering, not a handshake that never started.
     // Usually a wrong appUrl, an unreachable environment, or a Symbo build
     // without the embed surface. Name those, so nobody starts by debugging
     // their own code.
