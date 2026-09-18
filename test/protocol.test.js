@@ -924,15 +924,55 @@ describe('commands settle on the answer', () => {
 
   it('rejects with COMMAND_TIMEOUT when Symbo never answers', async () => {
     const { dialer } = await readyDialer(env, SymboDialer, { commandTimeoutMs: 2000 })
-    const dialing = dialer.dial({ number: '+1' })
+    const hangingUp = dialer.hangUp()
     const settled = vi.fn()
-    dialing.catch(settled)
+    hangingUp.catch(settled)
 
     await vi.advanceTimersByTimeAsync(1999)
     expect(settled).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(1)
     expect(settled.mock.calls[0][0].code).toBe(CLIENT_ERRORS.COMMAND_TIMEOUT)
+    expect(settled.mock.calls[0][0].message).toContain('"hangUp"')
+  })
+
+  it('waits longer than the frame does for the call id, whatever commandTimeoutMs says', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer, {
+      commandTimeoutMs: 2000,
+    })
+    const dialing = dialer.dial({ number: '+1' })
+    const settled = vi.fn()
+    dialing.then(settled, settled)
+
+    // The frame answers dial only once the carrier reports the call ringing,
+    // or after its own 15 s wait for the id — a clock that starts after the
+    // message has crossed. A short commandTimeoutMs must not pre-empt it and
+    // reject a call that has really been placed.
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(settled).not.toHaveBeenCalled()
+
+    symbo.answer(symbo.lastCommand().requestId, { callId: 'c-1' })
+    expect(await dialing).toEqual({ callId: 'c-1' })
+  })
+
+  it('still times out a dial the frame never answers, on the dial budget', async () => {
+    const { dialer } = await readyDialer(env, SymboDialer)
+    const dialing = dialer.dial({ number: '+1' })
+    const settled = vi.fn()
+    dialing.catch(settled)
+
+    await vi.advanceTimersByTimeAsync(24999)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(settled.mock.calls[0][0].code).toBe(CLIENT_ERRORS.COMMAND_TIMEOUT)
     expect(settled.mock.calls[0][0].message).toContain('"dial"')
+    expect(settled.mock.calls[0][0].message).toContain('25000ms')
+  })
+
+  it('resolves dial with a null callId when the frame never learned one', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const dialing = dialer.dial({ prospectId: 'p-1001' })
+    symbo.answer(symbo.lastCommand().requestId, { callId: null })
+    expect(await dialing).toEqual({ callId: null })
   })
 
   it('destroy() removes the frame, rejects what was pending, and refuses what follows', async () => {

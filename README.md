@@ -283,6 +283,13 @@ const { callId } = await dialer.dial({ prospectId: 'p-1001', phoneNumberId: 'pn-
 const { callId } = await dialer.dial({ number: '+12125550123', externalId: 'case-48211' })
 ```
 
+`dial()` resolves when the carrier reports the call ringing, which is where
+the `callId` comes from. A `callId` of `null` is not a failed call: it comes
+back **fast** for a call that failed outright or was answered on another
+device, and after about 15 s for one that rings for a long time. Either way
+`call.started`, `call.ringing` and `call.ended` carry the id once it is known,
+so key your record off the events rather than off this resolution alone.
+
 Events: `call.started` → `call.ringing` → `call.answered` (far-end pickup) →
 `call.ended { reason, durationSeconds }` → `call.wrap` → `call.completed` once
 the outcome is saved (in Symbo, or by your server with `PUT /calls/:id`).
@@ -358,7 +365,10 @@ with a code, and is withdrawn with `warning.cleared`. `dialer.warnings` is a
 
 Options: `container` (required), `appUrl` (an origin; default
 `https://app.symbo.ai`), `mode` (`'compact'` \| `'hidden'`), `mountTimeoutMs`
-(default 30 000), `commandTimeoutMs` (default 15 000).
+(default 30 000), `commandTimeoutMs` (default 15 000). `commandTimeoutMs` does
+not apply to `dial()`, which always allows at least 25 s: the frame itself
+waits up to 15 s for the carrier to report the call ringing, and a shorter
+budget here would reject a call that has really been placed.
 
 ### Commands
 
@@ -368,7 +378,7 @@ one of the [error codes](#error-codes) and whose `.message` says why.
 
 | Command | Resolves with |
 | --- | --- |
-| `dial({ number \| prospectId, phoneNumberId?, externalId?, externalObjectType?, fullName? })` | `{ callId }` |
+| `dial({ number \| prospectId, phoneNumberId?, externalId?, externalObjectType?, fullName? })` | `{ callId }` — `callId` is `null` when the carrier never reported the call ringing |
 | `hangUp()` | `{}` |
 | `setContact({ … })` | `{}` |
 | `getState()` | the state object above |

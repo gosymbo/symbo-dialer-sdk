@@ -181,6 +181,17 @@ const SAVE_OUTCOME_THEN = new Set(['resume', 'pause', 'end'])
 // fails to reply at all; a refusal comes back fast.
 const DEFAULT_COMMAND_TIMEOUT_MS = 15000
 
+// `dial` is the one command that cannot share that budget. The frame answers
+// it only once the Symbo call id arrives — the carrier reporting remote
+// ringing — or after its own 15 s wait for one, and that clock starts after
+// the message has crossed and, for a prospectId, after a prospect lookup. A
+// 15 s budget here therefore expires first on any slow-ringing call: the
+// promise rejects with COMMAND_TIMEOUT, the frame's answer arrives to a
+// pending entry that is already gone, and the partner has a live call with no
+// callId. Keep this above the frame's CALL_ID_TIMEOUT_MS (symbo-ui
+// EmbedBridge.js); the two move together.
+const DIAL_TIMEOUT_MS = 25000
+
 // How long mount() waits for the frame to say anything. Cleared the moment
 // Symbo answers, with `ready` or with `auth.required` — a user taking their
 // time over a sign-in is not a timeout.
@@ -644,7 +655,7 @@ class SymboDialerClient {
     )
   }
 
-  send(type, payload = {}) {
+  send(type, payload = {}, { timeoutMs } = {}) {
     if (this.destroyed) return Promise.reject(destroyedError())
 
     if (!this.mountPromise) {
@@ -665,6 +676,8 @@ class SymboDialerClient {
       )
     }
 
+    const budget = timeoutMs ?? this.commandTimeoutMs
+
     return new Promise((resolve, reject) => {
       const post = () => {
         const requestId = `r${++this.requestSeq}`
@@ -674,10 +687,10 @@ class SymboDialerClient {
           reject(
             new SymboDialerError(
               CLIENT_ERRORS.COMMAND_TIMEOUT,
-              `Symbo did not answer "${publicName(type)}" within ${this.commandTimeoutMs}ms.`
+              `Symbo did not answer "${publicName(type)}" within ${budget}ms.`
             )
           )
-        }, this.commandTimeoutMs)
+        }, budget)
 
         this.pending.set(requestId, { resolve, reject, timer })
 
@@ -704,13 +717,21 @@ class SymboDialerClient {
   /**
    * Place a call. Either `number` (any format your records hold) or
    * `prospectId` (a Symbo prospect, optionally with the `phoneNumberId` to
-   * dial). Resolves with `{ callId }`.
+   * dial). Resolves with `{ callId }` — `callId` is `null` when the carrier
+   * never reported the call ringing; the `call.*` events carry the id once it
+   * is known.
+   *
+   * The frame waits up to 15 s for that id, so this is the one command
+   * `commandTimeoutMs` does not shorten: a small one would time out calls
+   * that are really ringing.
    */
   dial(options = {}) {
     if (!options.number && !options.prospectId) {
       return Promise.reject(invalid('dial needs a number or a prospectId.'))
     }
-    return this.send(COMMANDS.DIAL, options)
+    return this.send(COMMANDS.DIAL, options, {
+      timeoutMs: Math.max(this.commandTimeoutMs, DIAL_TIMEOUT_MS),
+    })
   }
 
   hangUp() {
