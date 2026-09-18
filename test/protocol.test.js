@@ -219,6 +219,11 @@ describe('wire protocol', () => {
 
 /* -------------------------------------------------------------------------- */
 
+// The period of the hello loop. src/index.js keeps HELLO_RETRY_MS private, so
+// the tests restate it here rather than scattering a bare 400 through the
+// counts below; if the source constant moves, move this one with it.
+const HELLO_RETRY_MS = 400
+
 describe('create and mount', () => {
   let env
 
@@ -306,7 +311,7 @@ describe('create and mount', () => {
     expect(dialer.user).toEqual({ id: 'u-1' })
   })
 
-  it('says hello once the frame is in the document, pinned to the origin, and repeats until Symbo answers', async () => {
+  it('says hello as soon as the frame can hear it, pinned to the origin, and repeats until Symbo answers', async () => {
     const dialer = SymboDialer.create({
       container: env.makeContainer(),
       appUrl: APP_URL,
@@ -314,8 +319,17 @@ describe('create and mount', () => {
     const mounting = dialer.mount()
     const symbo = fakeSymbo(env, dialer)
 
-    // Without waiting for `load`: the frame is appended, so we are already
-    // asking.
+    // Appending the frame posts no hello, and that is deliberate rather than
+    // an accident of ordering: the frame is still on about:blank, whose
+    // origin is the string "null", so a post to the origin we pinned is
+    // refused and the browser logs a warning the partner cannot silence. The
+    // loop is armed from mount all the same — the two tests below named for
+    // a frame that never fires `load` hold that end.
+    expect(symbo.posted()).toHaveLength(0)
+
+    // `load` is the first moment the frame can hear us, and it says hello
+    // there and then.
+    symbo.load()
     expect(symbo.posted()).toHaveLength(1)
     expect(symbo.posted()[0].targetOrigin).toBe(APP_URL)
     expect(symbo.posted()[0].data).toEqual({
@@ -324,16 +338,20 @@ describe('create and mount', () => {
       protocolVersion: PROTOCOL_VERSION,
     })
 
-    // `load` restarts the loop rather than adding a second one.
-    symbo.load()
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
-
-    await vi.advanceTimersByTimeAsync(1000)
+    // It restarted the loop rather than adding a second one: three periods,
+    // three more hellos. A timer left over from mount would double this
+    // count and every one after it.
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 3)
     expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(4)
+    symbo.posted().forEach(({ data, targetOrigin }) => {
+      expect(targetOrigin).toBe(APP_URL)
+      expect(data.protocolVersion).toBe(PROTOCOL_VERSION)
+      expect(data.payload).toEqual({ protocolVersion: PROTOCOL_VERSION })
+    })
 
     symbo.ready()
     await mounting
-    await vi.advanceTimersByTimeAsync(2000)
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 10)
     expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(4)
   })
 
@@ -346,9 +364,9 @@ describe('create and mount', () => {
     const symbo = fakeSymbo(env, dialer)
 
     // A frame whose listener is already attached replies inside the same
-    // tick as the hello it heard. The hello posted at mount reached a frame
-    // that was not listening yet and went nowhere, which is the second one
-    // counted below.
+    // tick as the hello it heard. Appending the frame posted none — it was
+    // still on about:blank — so the hello `load` posts is the only one, and
+    // an answer arriving during it must leave no timer behind.
     dialer.iframe.contentWindow.postMessage = (data, targetOrigin) => {
       dialer.iframe.posted.push({ data, targetOrigin })
       if (data.type === COMMANDS.HELLO) symbo.ready()
@@ -356,8 +374,8 @@ describe('create and mount', () => {
     symbo.load()
     await mounting
 
-    await vi.advanceTimersByTimeAsync(3000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 8)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
   })
 
   it('stops the hello loop on auth.required too, and restarts it when the frame reloads', async () => {
@@ -368,20 +386,20 @@ describe('create and mount', () => {
     dialer.mount()
     const symbo = fakeSymbo(env, dialer)
 
-    // One hello at mount, one more when `load` restarts the loop, then
-    // silence once the frame has answered.
+    // One hello when `load` says the frame can hear us — appending it posted
+    // none — and then silence once the frame has answered.
     symbo.load()
     symbo.authRequired()
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 5)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
 
     // The in-frame sign-in reloads the frame: load fires again, we must ask
     // again, and an auth.required repeat must stop us again.
     symbo.load()
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
     symbo.authRequired()
-    await vi.advanceTimersByTimeAsync(2000)
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 5)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
   })
 
   // A frame whose document never settles never fires `load`: one media error
@@ -400,11 +418,23 @@ describe('create and mount', () => {
     const rejected = vi.fn()
     mounting.catch(rejected)
 
-    // Note what this test never calls: symbo.load().
+    // Note what this test never calls: symbo.load(). Appending the frame
+    // posts nothing either — that leading hello is skipped so the browser
+    // does not log an about:blank origin warning — so every hello counted
+    // here comes from the interval armed at mount, which is the net itself.
+    expect(symbo.posted()).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS)
     expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
     expect(symbo.posted()[0].targetOrigin).toBe(APP_URL)
+    expect(symbo.posted()[0].data).toEqual({
+      type: COMMANDS.HELLO,
+      payload: { protocolVersion: PROTOCOL_VERSION },
+      protocolVersion: PROTOCOL_VERSION,
+    })
 
-    await vi.advanceTimersByTimeAsync(1000)
+    // And it keeps asking for as long as the frame stays silent.
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 2)
     expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
 
     // The frame's listener attaches on its own schedule and answers the
@@ -432,7 +462,11 @@ describe('create and mount', () => {
     const authRequired = vi.fn()
     dialer.on('auth.required', authRequired)
 
-    await vi.advanceTimersByTimeAsync(1000)
+    // No load here either, and no hello from the append itself: the interval
+    // armed at mount is the only thing keeping this frame in earshot.
+    expect(symbo.posted()).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS * 3)
     expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(3)
 
     symbo.authRequired('https://app.symbo.ai/login?guest=abc')
@@ -500,9 +534,10 @@ describe('create and mount', () => {
     })
 
     await vi.advanceTimersByTimeAsync(10000)
-    // The hello at mount and the one `load` restarted, and nothing after the
-    // refusal.
-    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(2)
+    // The one hello `load` posted — appending the frame posts none — and
+    // nothing at all after the refusal.
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+    expect(symbo.posted()).toHaveLength(1)
     expect(errors).toHaveBeenCalledTimes(1)
     expect(warnings).toHaveBeenCalledTimes(1)
     expect(dialer.warnings.get(ERRORS.ORIGIN_NOT_ALLOWED)).toBe(
