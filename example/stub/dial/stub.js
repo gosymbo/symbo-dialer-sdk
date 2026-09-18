@@ -497,22 +497,11 @@
     })
     render()
 
-    // A one-off call's outcome is saved from the partner's server
-    // (PUT /calls/:id) or in Symbo; call.completed follows that save. The
-    // stub pretends it happened.
-    later(1500, () =>
-      post('symbo:call.completed', {
-        callId: ended.callId,
-        externalId: ended.externalId ?? null,
-        prospectId: ended.prospectId,
-        outcomeId: 'o-connected',
-        outcome: 'Connected',
-        disposition: 'Connected',
-        dispositionGroup: 'answered',
-        note: null,
-        durationSeconds,
-      })
-    )
+    // And that is the end of it. A one-off or inbound call has no outcome
+    // form in embed mode and no command to save one: the partner's server
+    // does it with PUT /calls/:id, so no call.completed reaches the page.
+    // The stub used to fabricate one here, which taught the example page to
+    // expect an event the real frame never sends.
     scheduleInbound(INBOUND_AFTER_IDLE_MS)
   }
 

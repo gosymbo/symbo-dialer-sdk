@@ -291,11 +291,16 @@ device, and after about 15 s for one that rings for a long time. Either way
 so key your record off the events rather than off this resolution alone.
 
 Events: `call.started` → `call.ringing` → `call.answered` (far-end pickup) →
-`call.ended { reason, durationSeconds }` → `call.wrap` → `call.completed` once
-the outcome is saved (in Symbo, or by your server with `PUT /calls/:id`).
-`contact.matched` fires when Symbo recognises a number you dialled without a
-prospect. `dial()` is refused with `SESSION_ACTIVE` while a session runs: the
-rep's line is busy for the whole session.
+`call.ended { reason, durationSeconds }` → `call.wrap`. That is the end of it:
+embed mode shows no outcome form, and there is no command for saving a one-off
+outcome (`session.saveOutcome` is for the call in front of the rep in a
+session, and refuses with `NO_ACTIVE_SESSION` outside one). Render your own
+wrap-up on `call.wrap` and save it from your server with `PUT /calls/:id`; the
+completion signal is that response, or Symbo's `call.updated` / `call.completed`
+webhooks — not an event in the page. `contact.matched` fires when Symbo
+recognises a number you dialled without a prospect. `dial()` is refused with
+`SESSION_ACTIVE` while a session runs: the rep's line is busy for the whole
+session.
 
 `externalId` comes back on the call events and on the `call.*` webhooks, which
 is how a call lands against your record without a prospect. Prefer
@@ -318,6 +323,9 @@ dialer.on('call.ended', ({ callId }) => {
   if (callId === ringingCallId) ringtone.pause()
 })
 ```
+
+An answered inbound call ends the way a one-off call does — `call.ended` →
+`call.wrap`, and the outcome is yours to save with `PUT /calls/:id`.
 
 An inbound call that arrives while a session is active, or while a call is
 up, is not offered to the page: it follows the rep's normal no-answer routing
@@ -428,7 +436,7 @@ receives everything.
 | `call.answered` | `{ callId }` — the far end picked up |
 | `call.ended` | `{ callId, reason, durationSeconds }` |
 | `call.wrap` | `{ callId, prospectId, answered, durationSeconds, outcomeRequired }` |
-| `call.completed` | `{ callId, externalId, prospectId, outcomeId, outcome, disposition, dispositionGroup, note, durationSeconds }` — after the outcome save succeeded |
+| `call.completed` | `{ callId, externalId, prospectId, outcomeId, outcome, disposition, dispositionGroup, note, durationSeconds }` — after a save made through `session.saveOutcome` succeeded. A one-off outcome, saved from your server, does not produce it |
 | `contact.matched` | `{ number, externalId, prospect: { id, fullName } }` |
 | `audio.devicesChanged` | same shape as `audio.list()` |
 | `session.started` | `{ dialSessionId, concurrentCalls }` |

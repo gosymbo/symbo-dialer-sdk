@@ -959,6 +959,21 @@
           if (incoming?.callId === callId) hideIncoming()
         })
 
+        // ---- one-off and inbound calls end here
+        //
+        // A call outside a session has no outcome form in the frame and no
+        // command to save one: this is where a real page would show its own
+        // wrap-up and post the outcome from its server. Nothing else follows
+        // in the page — no call.completed.
+        dialer.on('call.wrap', ({ callId, answered, durationSeconds }) => {
+          // A session's calls are wrapped through the panel above.
+          if (session) return
+          setStatus(
+            `Call ended · ${answered ? 'answered' : 'no answer'} · ${durationSeconds}s — your server saves the outcome: PUT /calls/${callId}`,
+            'warn'
+          )
+        })
+
         refreshButtons()
 
         dialer.mount().catch((err) => {

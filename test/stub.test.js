@@ -316,14 +316,15 @@ describe('the offline stub, driven through the SDK', () => {
     stub.poke('stub:ringInbound')
     const second = seen.find(([n]) => n === 'call.incoming')[1]
     expect(await dialer.answerIncoming()).toEqual({ callId: second.callId })
-    // The far end hangs up after 6 s; call.completed follows the outcome save.
+    // The far end hangs up after 6 s. An answered inbound call ends at
+    // call.wrap: its outcome is saved by the partner's server, so no
+    // call.completed follows in the page.
     await vi.advanceTimersByTimeAsync(8000)
     expect(seen.map(([n]) => n)).toEqual([
       'call.incoming',
       'call.answered',
       'call.ended',
       'call.wrap',
-      'call.completed',
     ])
     expect(seen[3][1]).toMatchObject({ callId: second.callId, answered: true, outcomeRequired: true })
   })
@@ -348,13 +349,15 @@ describe('the offline stub, driven through the SDK', () => {
     await vi.advanceTimersByTimeAsync(2000)
     expect(await dialer.hangUp()).toEqual({})
     await vi.advanceTimersByTimeAsync(2000)
+    // call.wrap is the last word on a one-off call: embed mode has no
+    // outcome form and no command to save one, so the page never sees
+    // call.completed for it.
     expect(seen.map(([n]) => n)).toEqual([
       'call.started',
       'call.ringing',
       'call.answered',
       'call.ended',
       'call.wrap',
-      'call.completed',
     ])
     expect(seen[3][1]).toMatchObject({ callId, reason: 'hangup' })
 
