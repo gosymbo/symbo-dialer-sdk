@@ -476,19 +476,41 @@ describe('create and mount', () => {
 
     const tab = dialer.openSignIn()
     expect(tab).toBeTruthy()
+    // No `noopener` feature: it makes window.open() return null even when
+    // the tab opened, which would be read here as a blocked popup. The
+    // opener is severed by hand instead.
     expect(env.opened).toEqual([
-      {
-        url: 'https://app.symbo.ai/login?guest=abc',
-        target: '_blank',
-        features: 'noopener',
-      },
+      { url: 'https://app.symbo.ai/login?guest=abc', target: '_blank' },
     ])
+    expect(tab.opener).toBeNull()
 
     env.setOpenResult(null)
     try {
       dialer.openSignIn()
       throw new Error('should have thrown')
     } catch (err) {
+      expect(err.code).toBe(CLIENT_ERRORS.POPUP_BLOCKED)
+    }
+  })
+
+  it('openSignIn() reports POPUP_BLOCKED when window.open throws', () => {
+    const dialer = SymboDialer.create({
+      container: env.makeContainer(),
+      appUrl: APP_URL,
+    })
+    dialer.mount()
+    const symbo = fakeSymbo(env, dialer)
+    symbo.load()
+    symbo.authRequired('https://app.symbo.ai/login?guest=abc')
+
+    // A sandboxed iframe without allow-popups throws a DOMException rather
+    // than returning null; the documented code has to hold there too.
+    env.setOpenResult('throw')
+    try {
+      dialer.openSignIn()
+      throw new Error('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(SymboDialerError)
       expect(err.code).toBe(CLIENT_ERRORS.POPUP_BLOCKED)
     }
   })

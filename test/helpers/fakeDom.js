@@ -72,7 +72,18 @@ export function installFakeDom({ openResult = 'window' } = {}) {
     },
     open(url, target, features) {
       opened.push({ url, target, features })
-      return openReturns === 'window' ? { closed: false } : null
+      // A sandboxed iframe without allow-popups throws instead of returning
+      // null.
+      if (openReturns === 'throw') {
+        throw new Error('Blocked opening a window in a sandboxed frame.')
+      }
+      // The real window.open() returns null whenever `noopener` is set —
+      // whether or not the tab opened. Anything that reads that null as a
+      // blocked popup is wrong, so the double has to reproduce it.
+      if (typeof features === 'string' && /\bnoopener\b/.test(features)) {
+        return null
+      }
+      return openReturns === 'window' ? { closed: false, opener: {} } : null
     },
   }
 

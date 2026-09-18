@@ -373,7 +373,7 @@ one of the [error codes](#error-codes) and whose `.message` says why.
 | `setContact({ … })` | `{}` |
 | `getState()` | the state object above |
 | `signIn({ code })` | `{ user }` |
-| `openSignIn()` | the opened `Window` (synchronous; throws `NO_LOGIN_URL` / `POPUP_BLOCKED`) |
+| `openSignIn()` | the opened `Window` (synchronous; throws `NO_LOGIN_URL` / `POPUP_BLOCKED`). Wait for `ready`, not for that window to close: under `Cross-Origin-Opener-Policy: same-origin` the handle is severed when the login page loads and starts reading `closed === true` |
 | `answerIncoming()` | `{ callId }` |
 | `ignoreIncoming()` | `{}` |
 | `audio.list()` | `{ microphones, speakers, selected }` |

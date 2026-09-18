@@ -719,6 +719,11 @@ class SymboDialerClient {
    * way. The URL comes from `auth.required`, so there is nothing to open
    * until that has arrived — listen for it and show your button then. When
    * the sign-in completes the frame picks it up and `ready` follows.
+   *
+   * The returned Window is for closing or focusing the tab, nothing more.
+   * A page served with `Cross-Origin-Opener-Policy: same-origin` has its
+   * handle severed the moment the login document commits, after which
+   * `closed` reads true: wait for `ready`, not for the tab to close.
    */
   openSignIn() {
     if (!this.loginUrl) {
@@ -727,13 +732,34 @@ class SymboDialerClient {
         'Symbo has not asked for a sign-in. Wait for the "auth.required" event.'
       )
     }
-    const opened = window.open(this.loginUrl, '_blank', 'noopener')
+
+    // Not the `noopener` feature: per the HTML window-open steps it makes
+    // window.open() return null even when the tab opens, which is
+    // indistinguishable from a blocked popup. Open, then disown by hand.
+    let opened = null
+    try {
+      opened = window.open(this.loginUrl, '_blank')
+    } catch {
+      // A sandboxed iframe without allow-popups throws rather than returning
+      // null. Same story for the caller: there is no tab.
+      opened = null
+    }
+
     if (!opened) {
       throw new SymboDialerError(
         CLIENT_ERRORS.POPUP_BLOCKED,
         'The browser blocked the sign-in tab. Call openSignIn() from a click handler.'
       )
     }
+
+    // What `noopener` was there for: the login tab must not be able to
+    // navigate the partner's page through window.opener.
+    try {
+      opened.opener = null
+    } catch {
+      // Some engines refuse the cross-origin set; the tab is open either way.
+    }
+
     return opened
   }
 
