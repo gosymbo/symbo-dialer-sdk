@@ -165,6 +165,16 @@ export const CLIENT_ERRORS = Object.freeze({
 // `ready`, because there is no user to act for until then.
 const PRE_READY_COMMANDS = new Set([COMMANDS.SIGN_IN, COMMANDS.GET_STATE])
 
+// The two codes Symbo answers the handshake with when it will not talk to this
+// page at all: the organisation does not have the embedded dialer, or this
+// origin is not on its list. They arrive as an `error` and a `warning` with no
+// requestId to answer, and nothing the page does will change them, so mount()
+// rejects with the code instead of waiting out its timer.
+const HANDSHAKE_REFUSALS = new Set([
+  ERRORS.EMBED_NOT_ENABLED,
+  ERRORS.ORIGIN_NOT_ALLOWED,
+])
+
 const SAVE_OUTCOME_THEN = new Set(['resume', 'pause', 'end'])
 
 // How long to wait for an answer before giving up. Only reachable if Symbo
@@ -443,16 +453,16 @@ class SymboDialerClient {
 
   // Symbo has spoken. Whatever it said, the hello loop and the mount timer
   // have done their job, and commands that were waiting for a frame to talk
-  // to can go.
+  // to can go. Called for every message the frame sends, so it has to stay
+  // cheap and repeatable; a second call is a no-op.
   markContacted() {
     this.stopSayingHello()
     this.clearMountTimer()
     this.contacted = true
-    this.flushAwaitingContact()
+    if (this.awaitingContact.length) this.flushAwaitingContact()
   }
 
   onReady(payload) {
-    this.markContacted()
     this.ready = true
     this.authPending = false
     this.loginUrl = null
@@ -484,7 +494,6 @@ class SymboDialerClient {
    * expired — and goes through.
    */
   onAuthRequired(payload) {
-    this.markContacted()
     const repeat = this.authPending && !this.ready
     this.ready = false
     this.authPending = true
@@ -537,12 +546,20 @@ class SymboDialerClient {
     const data = event.data
     if (!data || typeof data.type !== 'string') return
 
-    if (data.type === RESULT) {
+    const isResult = data.type === RESULT
+    if (!isResult && !Object.values(EVENTS).includes(data.type)) return
+
+    // Anything the frame says at all — ready, auth.required, an answer, or a
+    // refusal of the handshake — proves it is listening and has recorded our
+    // origin, which is the whole job of the hello loop and the mount timer.
+    // Before the handshake completes the frame only ever posts in answer to
+    // our own hello, so there is no message here that is not contact.
+    this.markContacted()
+
+    if (isResult) {
       this.settle(data.payload || {})
       return
     }
-
-    if (!Object.values(EVENTS).includes(data.type)) return
 
     this.receive(publicName(data.type), data.payload || {})
   }
@@ -551,6 +568,22 @@ class SymboDialerClient {
   // reads `dialer.user` or `dialer.warnings` sees the state the event
   // describes.
   receive(name, payload) {
+    // A refused handshake arrives as both an `error` and a `warning` with the
+    // same code; the warning is the one that always carries a sentence. Keyed
+    // on the code rather than the event name, so an unrelated pre-ready error
+    // cannot kill a mount that would still have gone ready. rejectMount()
+    // forgets the promise, so the pair and any repeat cost nothing, and a
+    // refusal arriving after `ready` leaves the resolved mount alone.
+    if (
+      !this.ready &&
+      (name === 'error' || name === 'warning') &&
+      HANDSHAKE_REFUSALS.has(payload.code)
+    ) {
+      this.rejectMount(
+        new SymboDialerError(payload.code, payload.message || payload.code)
+      )
+    }
+
     switch (name) {
       case 'ready':
         this.onReady(payload)

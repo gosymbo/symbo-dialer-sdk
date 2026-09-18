@@ -353,7 +353,7 @@ with a code, and is withdrawn with `warning.cleared`. `dialer.warnings` is a
 | --- | --- |
 | `SymboDialer.create(options)` | Returns a client without touching the page. Attach listeners, then `mount()` |
 | `SymboDialer.mount(options)` | `create(options).mount()` |
-| `dialer.mount()` | Creates the iframe. Resolves with the client on `ready`; rejects with `MOUNT_TIMEOUT` if the frame never answers; calling it again returns the same promise |
+| `dialer.mount()` | Creates the iframe. Resolves with the client on `ready`; rejects with `MOUNT_TIMEOUT` if the frame never answers, or with `EMBED_NOT_ENABLED` / `ORIGIN_NOT_ALLOWED` if it answers by refusing the page; calling it again returns the same promise, settled the same way — a client whose mount was refused cannot be retried, so make a new one |
 | `dialer.destroy()` | Removes the iframe and its listeners; anything still pending rejects with `DESTROYED` |
 
 Options: `container` (required), `appUrl` (an origin; default
@@ -494,8 +494,12 @@ be right in advance.
 - **Chrome.** The embedded dialer is supported in Chrome. Other browsers are
   not covered.
 - **Allowed origins.** Your Symbo organisation lists the origins that may
-  embed; ask Symbo to add yours (test and live), or `ready` never comes and
-  you see `ORIGIN_NOT_ALLOWED`.
+  embed; ask Symbo to add yours (test and live). Until it is listed the frame
+  answers straight away: `ORIGIN_NOT_ALLOWED` as an `error` and a `warning`,
+  and `mount()` rejects with that code rather than waiting out its timer.
+  `EMBED_NOT_ENABLED` is the same answer for an organisation without the
+  embedded dialer at all. Create a new client once it is sorted — the
+  refused one keeps its rejected `mount()` promise.
 
 ## SDK versions and Symbo releases
 

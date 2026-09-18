@@ -400,6 +400,97 @@ describe('create and mount', () => {
     expect(err.message).toContain(APP_URL)
   })
 
+  it('takes a refused handshake as contact: one hello, and mount rejects with the code', async () => {
+    const dialer = SymboDialer.create({
+      container: env.makeContainer(),
+      appUrl: APP_URL,
+      mountTimeoutMs: 5000,
+    })
+    const mounting = dialer.mount()
+    const settled = vi.fn()
+    mounting.catch(settled)
+    const symbo = fakeSymbo(env, dialer)
+    const errors = vi.fn()
+    const warnings = vi.fn()
+    dialer.on('error', errors)
+    dialer.on('warning', warnings)
+
+    symbo.load()
+    // What the frame answers a hello with when the page's origin is not on
+    // the organisation's list: an error and a warning, neither answering a
+    // requestId. It has heard us — there is nothing left to say hello about.
+    symbo.event(EVENTS.ERROR, {
+      code: ERRORS.ORIGIN_NOT_ALLOWED,
+      message: 'This page may not embed the dialer.',
+    })
+    symbo.event(EVENTS.WARNING, {
+      code: ERRORS.ORIGIN_NOT_ALLOWED,
+      message: 'This page may not embed the dialer.',
+    })
+
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(1)
+    expect(errors).toHaveBeenCalledTimes(1)
+    expect(warnings).toHaveBeenCalledTimes(1)
+    expect(dialer.warnings.get(ERRORS.ORIGIN_NOT_ALLOWED)).toBe(
+      'This page may not embed the dialer.'
+    )
+
+    expect(settled).toHaveBeenCalledTimes(1)
+    const err = settled.mock.calls[0][0]
+    expect(err).toBeInstanceOf(SymboDialerError)
+    expect(err.code).toBe(ERRORS.ORIGIN_NOT_ALLOWED)
+    expect(err.message).toBe('This page may not embed the dialer.')
+    expect(err.message).not.toContain('did not respond')
+  })
+
+  it('posts what was queued before a refused handshake, and settles it from the frame', async () => {
+    const dialer = SymboDialer.create({
+      container: env.makeContainer(),
+      appUrl: APP_URL,
+      mountTimeoutMs: 5000,
+    })
+    const mounting = dialer.mount()
+    const settled = vi.fn()
+    mounting.catch(settled)
+    const symbo = fakeSymbo(env, dialer)
+
+    const asking = dialer.getState()
+    symbo.load()
+    expect(symbo.commandsOf(COMMANDS.GET_STATE)).toHaveLength(0)
+
+    symbo.event(EVENTS.ERROR, {
+      code: ERRORS.EMBED_NOT_ENABLED,
+      message: 'This organisation does not have the embedded dialer.',
+    })
+
+    // The frame answers getState in this state, so the queued command goes
+    // out and gets a real answer rather than a MOUNT_TIMEOUT.
+    const [sent] = symbo.commandsOf(COMMANDS.GET_STATE)
+    expect(sent).toBeTruthy()
+    symbo.answer(sent.requestId, {
+      signedIn: false,
+      warnings: [ERRORS.EMBED_NOT_ENABLED],
+    })
+    expect(await asking).toMatchObject({ signedIn: false })
+
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(settled.mock.calls[0][0].code).toBe(ERRORS.EMBED_NOT_ENABLED)
+  })
+
+  it('leaves a resolved mount alone when a refusal code arrives after ready', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+
+    symbo.event(EVENTS.ERROR, {
+      code: ERRORS.ORIGIN_NOT_ALLOWED,
+      message: 'too late to matter',
+    })
+
+    // mount() hands back the same promise it already resolved.
+    expect(await dialer.mount()).toBe(dialer)
+    expect(dialer.ready).toBe(true)
+  })
+
   it('stops the mount timer on auth.required and resolves on the ready that follows', async () => {
     const dialer = SymboDialer.create({
       container: env.makeContainer(),
