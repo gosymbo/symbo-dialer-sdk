@@ -1,7 +1,7 @@
 {
   "name": "@symbo/dialer-embed",
-  "version": "0.1.1",
-  "description": "Embed the Symbo dialer in your own application.",
+  "version": "0.2.0",
+  "description": "Embed the Symbo dialer in your own application: one-off calls, inbound calls and multi-line power-dial sessions, with the Symbo UI reduced to a strip or hidden.",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.js",

@@ -15,6 +15,8 @@
         --ok: #1a7f52;
         --warn: #9a5b12;
         --bad: #b3271e;
+        --ring: #fff4d6;
+        --live: #dff5e8;
         --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
       }
 
@@ -68,6 +70,7 @@
         border: 1px solid var(--line);
         border-radius: 8px;
         overflow: hidden;
+        margin-bottom: 20px;
       }
       .panel > h2 {
         margin: 0;
@@ -78,18 +81,47 @@
         color: var(--muted);
         border-bottom: 1px solid var(--line);
         font-weight: 600;
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+      }
+      .panel > h2 .counts {
+        margin-left: auto;
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 500;
+      }
+      .panel[hidden] {
+        display: none;
       }
 
       table {
         width: 100%;
         border-collapse: collapse;
       }
-      td {
-        padding: 12px 16px;
+      td,
+      th {
+        padding: 10px 16px;
         border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: middle;
+      }
+      th {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
       }
       tr:last-child td {
         border-bottom: 0;
+      }
+      tr.ringing td {
+        background: var(--ring);
+      }
+      tr.connected td {
+        background: var(--live);
+      }
+      tr.done td {
+        color: var(--muted);
       }
       .who {
         font-weight: 600;
@@ -103,6 +135,35 @@
         font-family: var(--mono);
         font-size: 13px;
         white-space: nowrap;
+      }
+      .pill {
+        display: inline-block;
+        font-size: 12px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: var(--bg);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .pill.ringing {
+        background: #ffe4a8;
+        color: var(--warn);
+      }
+      .pill.connected {
+        background: #b9ecd0;
+        color: var(--ok);
+      }
+      .pill.wrap {
+        background: #dbe4ff;
+        color: var(--accent);
+      }
+      .pill.saved {
+        background: #e6f4ec;
+        color: var(--ok);
+      }
+      .pill.bad {
+        background: #fde3e1;
+        color: var(--bad);
       }
 
       button {
@@ -119,6 +180,14 @@
         background: transparent;
         color: var(--accent);
       }
+      button.danger {
+        border-color: var(--bad);
+        background: var(--bad);
+      }
+      button.small {
+        font-size: 12px;
+        padding: 3px 8px;
+      }
       button:disabled {
         opacity: 0.45;
         cursor: not-allowed;
@@ -128,36 +197,57 @@
         outline-offset: 2px;
       }
 
-      .adhoc {
-        padding: 12px 16px;
-        border-top: 1px solid var(--line);
-      }
-      .adhoc-row {
-        display: flex;
-        gap: 8px;
-      }
-      .adhoc input {
+      input,
+      select,
+      textarea {
         font: inherit;
         font-size: 13px;
-        font-family: var(--mono);
-        flex: 1;
-        min-width: 0;
         padding: 6px 10px;
         border-radius: 6px;
         border: 1px solid var(--line);
         background: var(--panel);
         color: var(--ink);
+        min-width: 0;
       }
-      .adhoc input:focus-visible {
+      input:focus-visible,
+      select:focus-visible,
+      textarea:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: -1px;
       }
-      .adhoc .hint {
+      textarea {
+        width: 100%;
+        resize: vertical;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .row:last-child {
+        border-bottom: 0;
+      }
+      .row[hidden] {
+        display: none;
+      }
+      .row label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .row .grow {
+        flex: 1;
+      }
+      .hint {
         margin: 8px 0 0;
         font-size: 12px;
         color: var(--muted);
       }
-      .adhoc .hint code {
+      .hint code,
+      .mono {
         font-family: var(--mono);
       }
 
@@ -193,22 +283,71 @@
         background: var(--bad);
       }
 
-      #dialer-slot {
-        padding: 16px;
-        min-height: 120px;
+      #warnings {
+        margin: 0;
+        padding: 0;
+        list-style: none;
       }
-      #dialer-slot iframe {
-        display: block;
+      #warnings li {
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--line);
+        background: #fff7e6;
+        color: var(--warn);
+        font-size: 13px;
+      }
+      #warnings li code {
+        font-family: var(--mono);
+        margin-right: 8px;
       }
 
-      .controls {
+      #dialer-slot {
+        padding: 16px;
+      }
+      #dialer-slot:empty,
+      #dialer-slot.hidden-mode {
+        padding: 0;
+      }
+
+      #inbound {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        margin: 0 0 20px;
+        border: 1px solid #b9ecd0;
+        background: var(--live);
+        border-radius: 8px;
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      #inbound[hidden] {
+        display: none;
+      }
+      #inbound .who {
+        font-size: 15px;
+      }
+      #inbound .spacer {
+        flex: 1;
+      }
+
+      #wrap .call {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      #wrap .call .who {
+        font-size: 15px;
+      }
+      #wrap .actions {
         display: flex;
         gap: 8px;
-        padding: 0 16px 16px;
+        flex-wrap: wrap;
+        padding: 12px 16px;
       }
 
       #log {
         margin: 0;
+        padding: 0;
         max-height: 420px;
         overflow-y: auto;
         font-family: var(--mono);
@@ -232,6 +371,9 @@
       #log .n.err {
         color: var(--bad);
       }
+      #log .n.cmd {
+        color: var(--accent);
+      }
       #log .p {
         color: var(--muted);
         word-break: break-word;
@@ -250,16 +392,92 @@
     </header>
 
     <div class="layout">
-      <section class="panel">
-        <h2>Cases</h2>
-        <table>
-          <tbody id="cases"></tbody>
-        </table>
+      <div>
+        <div id="inbound" hidden>
+          <span class="dot ok"></span>
+          <div>
+            <div class="who" id="inbound-who">Incoming call</div>
+            <div class="ref" id="inbound-from"></div>
+          </div>
+          <span class="spacer"></span>
+          <button id="inbound-answer">Answer</button>
+          <button class="ghost" id="inbound-ignore">Ignore</button>
+        </div>
 
-        <form class="adhoc" id="adhoc">
-          <div class="adhoc-row">
+        <section class="panel">
+          <h2>
+            Power dial session
+            <span class="counts" id="counts">no session</span>
+          </h2>
+          <div class="row">
+            <label for="session-id">Session</label>
+            <input
+              id="session-id"
+              class="mono grow"
+              value="ds-demo"
+              spellcheck="false"
+              aria-label="Dial session id"
+            />
+            <button id="s-start" disabled>Start</button>
+            <button class="ghost" id="s-pause" disabled>Pause</button>
+            <button class="ghost" id="s-resume" disabled>Resume</button>
+            <button class="ghost" id="s-skip" disabled>Skip current</button>
+            <button class="ghost" id="hangup" disabled>Hang up</button>
+            <button class="ghost danger" id="s-end" disabled>End</button>
+            <label><input type="checkbox" id="s-force" /> force</label>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Contact</th>
+                <th>Number</th>
+                <th>Local time</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="queue">
+              <tr>
+                <td colspan="5" class="hint" style="margin: 0">
+                  Your server creates the session with
+                  <code>POST /v1/dialSessions</code> and hands its id to this
+                  page. Start it here and the queue fills in from
+                  <code>session.getQueue()</code>.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" id="wrap" hidden>
+          <h2>Log call outcome</h2>
+          <div class="call">
+            <div class="who" id="wrap-who"></div>
+            <div class="ref" id="wrap-meta"></div>
+          </div>
+          <div class="row">
+            <label for="wrap-outcome">Outcome</label>
+            <select id="wrap-outcome" class="grow"></select>
+          </div>
+          <div class="row">
+            <textarea id="wrap-note" rows="2" placeholder="Notes"></textarea>
+          </div>
+          <div class="actions">
+            <button data-then="resume">Save &amp; dial next</button>
+            <button class="ghost" data-then="pause">Save &amp; pause</button>
+            <button class="ghost" data-then="end">Save &amp; finish</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Contacts</h2>
+          <table>
+            <tbody id="contacts"></tbody>
+          </table>
+          <form class="row" id="adhoc">
             <input
               id="adhoc-number"
+              class="mono grow"
               type="tel"
               placeholder="+12125550123"
               autocomplete="off"
@@ -267,28 +485,58 @@
               aria-label="Dial any number"
             />
             <button type="submit" id="adhoc-call" disabled>Call</button>
-          </div>
-          <p class="hint">
-            Dials without a case behind it. Any format your records hold —
-            Symbo normalises it against the user's country setting, same as a
-            number typed into the dialer itself.
-          </p>
-        </form>
-      </section>
+          </form>
+        </section>
+      </div>
 
       <div>
-        <section class="panel" style="margin-bottom: 20px">
+        <section class="panel">
           <h2>Symbo dialer</h2>
           <div class="status">
             <span class="dot" id="dot"></span>
             <span id="status">Starting…</span>
             <code id="target"></code>
           </div>
+          <ul id="warnings"></ul>
+          <div class="row" id="signin" hidden>
+            <button id="open-signin">Sign in with Symbo</button>
+            <input
+              id="signin-code"
+              class="mono grow"
+              placeholder="silent sign-in code"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="ghost" id="silent-signin">Sign in silently</button>
+            <p class="hint" style="flex-basis: 100%">
+              The button opens Symbo's login tab from your click. The code is
+              one your server minted with <code>POST /v1/embedSignInCodes</code>
+              (the stub accepts any word, and <code>expired</code> to see that
+              refusal).
+            </p>
+          </div>
           <div id="dialer-slot"></div>
-          <div class="controls">
-            <button class="ghost" id="hangup" disabled>Hang up</button>
-            <button class="ghost" id="toggle" disabled>Hide</button>
+          <div class="row">
+            <label for="mode">Mode</label>
+            <select id="mode">
+              <option value="widget">widget</option>
+              <option value="compact">compact</option>
+              <option value="hidden">hidden</option>
+            </select>
+            <span class="grow"></span>
             <button class="ghost" id="destroy">Destroy</button>
+          </div>
+          <div class="row">
+            <label for="mic">Mic</label>
+            <select id="mic" class="grow" disabled></select>
+            <label for="speaker">Speaker</label>
+            <select id="speaker" class="grow" disabled></select>
+          </div>
+          <div class="row" id="stub-controls" hidden>
+            <label>Stub</label>
+            <button class="ghost small" id="stub-inbound">Ring inbound</button>
+            <button class="ghost small" id="stub-blip">Realtime blip</button>
+            <button class="ghost small" id="stub-signout">Sign out</button>
           </div>
         </section>
 
@@ -307,183 +555,510 @@
       //   import { SymboDialer } from '@symbo/dialer-embed'
       import { SymboDialer, EVENTS } from '../src/index.js'
 
-      // Stand-in for the partner's own records. The only field Symbo needs is
-      // the number; `ref` is passed as externalId so every event and webhook
-      // comes back tagged with the case it belongs to.
-      const CASES = [
-        { ref: 'case-48211', name: 'Jane Doe', number: '+12125550123' },
-        { ref: 'case-48219', name: 'Marcus Bell', number: '+14155550142' },
-        { ref: 'case-48224', name: 'Priya Anand', number: '+13125550168' },
-        { ref: 'case-48231', name: 'Tom Okafor', number: '+16175550119' },
+      // ------------------------------------------------------------------
+      // The partner's own records. `prospectId` is the Symbo id stored when
+      // the contact was synced (POST /prospects); it is what every session
+      // event and webhook carries, so nothing else needs mapping.
+      // ------------------------------------------------------------------
+      const CONTACTS = [
+        { ref: 'case-48211', prospectId: 'p-1001', name: 'Jane Doe', number: '+12125550123', timeZone: 'America/New_York' },
+        { ref: 'case-48219', prospectId: 'p-1002', name: 'Marcus Bell', number: '+14155550142', timeZone: 'America/Los_Angeles' },
+        { ref: 'case-48224', prospectId: 'p-1003', name: 'Priya Anand', number: '+13125550168', timeZone: 'America/Chicago' },
+        { ref: 'case-48231', prospectId: 'p-1004', name: 'Tom Okafor', number: '+16175550119', timeZone: 'America/New_York' },
+        { ref: 'case-48237', prospectId: 'p-1005', name: 'Lena Fischer', number: '+12065550177', timeZone: 'America/Los_Angeles' },
+        { ref: 'case-48240', prospectId: 'p-1006', name: 'Diego Ramos', number: '+17135550131', timeZone: 'America/Chicago' },
       ]
 
-      // Which Symbo to talk to. Production unless told otherwise; the SDK
-      // appends /dial?embed=1, so this is an origin, not a path.
+      // Outcomes the partner created in Symbo (GET /v1/callOutcomes, cached).
+      const OUTCOMES = [
+        { id: 'o-connected', name: 'Connected' },
+        { id: 'o-meeting', name: 'Meeting booked' },
+        { id: 'o-callback', name: 'Callback (note required)' },
+        { id: 'o-not-interested', name: 'Not interested' },
+      ]
+
+      // Which Symbo to talk to, and how to render the frame. The SDK appends
+      // /dial?embed=1&mode=…, so appUrl is an origin, not a path.
       //
-      // Testers override it in the URL:
-      //   ?appUrl=https://<environment>            another Symbo environment
-      //   ?appUrl=http://localhost:3000/example/stub   the offline stub
-      const APP_URL =
-        new URLSearchParams(location.search).get('appUrl') ||
-        'https://app.symbo.ai'
+      //   ?appUrl=https://<environment>              another Symbo environment
+      //   ?appUrl=http://localhost:3000/example/stub  the offline stub
+      //   ?mode=widget|compact|hidden                 start in that mode
+      const query = new URLSearchParams(location.search)
+      const APP_URL = query.get('appUrl') || 'https://app.symbo.ai'
+      const IS_STUB = /\/example\/stub$/.test(APP_URL)
+      // This page draws its own queue and wrap-up, so it asks for the strip
+      // by default rather than taking the SDK's 'widget'.
+      const MODES = ['widget', 'compact', 'hidden']
+      let mode = MODES.includes(query.get('mode')) ? query.get('mode') : 'compact'
 
       const el = (id) => document.getElementById(id)
       const logEl = el('log')
+      const byProspect = (id) => CONTACTS.find((c) => c.prospectId === id)
+
       let dialer = null
+      let session = null // { dialSessionId, rows: Map<queuedCallId, row> }
+      let wrap = null
+      let incoming = null
 
-      /* ------------------------------------------------------------ render */
+      /* ---------------------------------------------------------- logging */
 
-      el('cases').innerHTML = CASES.map(
-        (c) => `
-        <tr>
-          <td>
-            <div class="who">${c.name}</div>
-            <div class="ref">${c.ref}</div>
-          </td>
-          <td class="num">${c.number}</td>
-          <td style="text-align: right">
-            <button data-ref="${c.ref}" disabled>Call</button>
-          </td>
-        </tr>`
-      ).join('')
+      function log(name, payload, tone = '') {
+        if (logEl.querySelector('.empty')) logEl.innerHTML = ''
+        const li = document.createElement('li')
+        li.innerHTML =
+          `<span class="t">${new Date().toLocaleTimeString()}</span> ` +
+          `<span class="n ${tone}"></span><div class="p"></div>`
+        li.querySelector('.n').textContent = name
+        li.querySelector('.p').textContent = JSON.stringify(payload)
+        logEl.prepend(li)
+        while (logEl.children.length > 200) logEl.lastChild.remove()
+      }
 
-      const callButtons = [...document.querySelectorAll('#cases button')]
-
-      // Worth showing: a timeout means something different depending on which
-      // environment you pointed this at, and nobody can tell from the page.
-      el('target').textContent = new URL(APP_URL).host
+      // Every command goes through here so the log shows the answer, or the
+      // refusal, next to the events it caused.
+      async function run(label, promise) {
+        try {
+          const data = await promise
+          log(`→ ${label}`, data, 'cmd')
+          return data
+        } catch (err) {
+          log(`✗ ${label}: ${err.code}`, { message: err.message }, 'err')
+          return null
+        }
+      }
 
       function setStatus(text, tone = '') {
         el('status').textContent = text
         el('dot').className = `dot ${tone}`
       }
 
-      // Showing and hiding the dialer is the host's job: the slot is our
-      // element, in our layout. There is no command for it and there shouldn't
-      // be — asking the frame to hide itself, so it can tell us the size it
-      // now wants, is a slow way to reach a line of CSS we could just write.
-      function setDialerVisible(show) {
-        el('dialer-slot').hidden = !show
-        el('toggle').textContent = show ? 'Hide' : 'Show'
+      /* --------------------------------------------------------- contacts */
+
+      el('contacts').innerHTML = CONTACTS.map(
+        (c) => `
+        <tr>
+          <td><div class="who">${c.name}</div><div class="ref">${c.ref} · ${c.prospectId}</div></td>
+          <td class="num">${c.number}</td>
+          <td class="ref">${localTime(c.timeZone)}</td>
+          <td style="text-align: right"><button class="small" data-prospect="${c.prospectId}" disabled>Call</button></td>
+        </tr>`
+      ).join('')
+
+      function localTime(timeZone) {
+        try {
+          return new Intl.DateTimeFormat([], { timeZone, hour: 'numeric', minute: '2-digit' }).format(new Date())
+        } catch {
+          return ''
+        }
       }
 
-      function setDialable(enabled) {
-        callButtons.forEach((b) => (b.disabled = !enabled))
-        el('hangup').disabled = !enabled
-        el('toggle').disabled = !enabled
-        el('adhoc-call').disabled = !enabled
+      /* ------------------------------------------------- enabling buttons */
+
+      function refreshButtons() {
+        const ready = !!dialer?.ready
+        const inSession = !!session
+        const wrapping = !!wrap
+
+        el('s-start').disabled = !ready || inSession
+        el('s-pause').disabled = !inSession
+        el('s-resume').disabled = !inSession || wrapping
+        el('s-skip').disabled = !inSession
+        el('s-end').disabled = !inSession
+        el('hangup').disabled = !ready
+        el('adhoc-call').disabled = !ready || inSession
+        document
+          .querySelectorAll('#contacts button')
+          .forEach((b) => (b.disabled = !ready || inSession))
+        el('mic').disabled = el('speaker').disabled = !ready
       }
 
-      function log(name, payload, isError = false) {
-        if (logEl.querySelector('.empty')) logEl.innerHTML = ''
+      /* ------------------------------------------------------------ queue */
 
-        const li = document.createElement('li')
-        const time = new Date().toLocaleTimeString()
-        li.innerHTML =
-          `<span class="t">${time}</span> ` +
-          `<span class="n${isError ? ' err' : ''}"></span>` +
-          `<div class="p"></div>`
-        li.querySelector('.n').textContent = name
-        li.querySelector('.p').textContent = JSON.stringify(payload)
-
-        logEl.prepend(li)
+      const STATUS_LABEL = {
+        queued: ['Up next', ''],
+        dialing: ['Calling now', 'ringing'],
+        attempted: ['Attempted', ''],
+        completed: ['Attempt saved', 'saved'],
+        cancelled: ['Cancelled', ''],
+        removed: ['Removed', ''],
       }
 
-      /* ------------------------------------------------------------- mount */
+      function renderQueue() {
+        if (!session) return
+        el('queue').innerHTML = [...session.rows.values()]
+          .sort((a, b) => a.order - b.order)
+          .map((row) => {
+            const contact = byProspect(row.prospectId)
+            const [label, tone] = row.label || STATUS_LABEL[row.status] || [row.status, '']
+            const cls = tone === 'ringing' ? 'ringing' : tone === 'connected' ? 'connected' : tone === 'saved' ? 'done' : ''
+            const removable = row.status === 'queued'
+            return `
+              <tr class="${cls}" data-id="${row.queuedCallId}">
+                <td><div class="who">${row.prospectName}</div><div class="ref">${contact?.ref ?? row.prospectId}</div></td>
+                <td class="num">${row.number ?? ''}</td>
+                <td class="ref">${contact ? localTime(contact.timeZone) : ''}</td>
+                <td><span class="pill ${tone}">${label}</span></td>
+                <td style="text-align: right">${removable ? `<button class="ghost small" data-remove="${row.queuedCallId}">Remove</button>` : ''}</td>
+              </tr>`
+          })
+          .join('')
+      }
 
-      try {
-        dialer = await SymboDialer.mount({
+      function renderCounts(counts) {
+        if (!counts) return (el('counts').textContent = session ? 'running' : 'no session')
+        el('counts').textContent = `${counts.completed ?? 0} completed · ${counts.remaining ?? 0} remaining`
+      }
+
+      // A leg event names the queued call it belongs to; the row is the unit
+      // the partner renders.
+      function setRow(queuedCallId, patch) {
+        if (!session) return
+        const row = session.rows.get(queuedCallId) || { queuedCallId, order: 999 }
+        Object.assign(row, patch)
+        session.rows.set(queuedCallId, row)
+        renderQueue()
+      }
+
+      async function loadQueue() {
+        const data = await run('session.getQueue', dialer.session.getQueue())
+        if (!data || !session) return
+        // Leg events may have landed while the answer was in flight; the
+        // labels they set are fresher than the queue's status.
+        session.rows = new Map(
+          data.queue.map((r) => [
+            r.queuedCallId,
+            { ...r, label: session.rows.get(r.queuedCallId)?.label ?? null },
+          ])
+        )
+        renderQueue()
+        renderCounts(data.counts)
+      }
+
+      /* ---------------------------------------------------------- wrap-up */
+
+      el('wrap-outcome').innerHTML = OUTCOMES.map((o) => `<option value="${o.id}">${o.name}</option>`).join('')
+
+      function showWrap(payload) {
+        wrap = payload
+        const contact = byProspect(payload.prospectId)
+        el('wrap-who').textContent = contact?.name ?? payload.prospectId
+        el('wrap-meta').textContent = `${payload.answered ? 'answered' : 'not answered'} · ${payload.durationSeconds}s · call ${payload.callId}`
+        el('wrap-note').value = ''
+        el('wrap').hidden = false
+        refreshButtons()
+      }
+
+      function hideWrap() {
+        wrap = null
+        el('wrap').hidden = true
+        refreshButtons()
+      }
+
+      document.querySelectorAll('#wrap .actions button').forEach((btn) =>
+        btn.addEventListener('click', async () => {
+          // Hold on to it: with then=end the session.ended event arrives
+          // before this resumes and has already cleared the panel.
+          const current = wrap
+          if (!current) return
+          const then = btn.dataset.then
+          const data = await run(
+            `session.saveOutcome then=${then}`,
+            dialer.session.saveOutcome({
+              callId: current.callId,
+              outcomeId: el('wrap-outcome').value,
+              note: el('wrap-note').value.trim() || undefined,
+              then,
+            })
+          )
+          if (!data) return
+          const outcome = OUTCOMES.find((o) => o.id === data.outcomeId)
+          setRow(current.queuedCallId, { status: 'completed', label: [`Attempt saved · ${outcome?.name ?? data.outcomeId}`, 'saved'] })
+          if (wrap === current) hideWrap()
+        })
+      )
+
+      /* ---------------------------------------------------------- inbound */
+
+      // The frame stays silent in compact and hidden mode; this is the
+      // partner's ringtone.
+      let audioCtx = null
+      let ringTimer = null
+      function startRinging() {
+        try {
+          audioCtx = audioCtx || new AudioContext()
+          const burst = () => {
+            const osc = audioCtx.createOscillator()
+            const gain = audioCtx.createGain()
+            osc.frequency.value = 880
+            gain.gain.value = 0.05
+            osc.connect(gain).connect(audioCtx.destination)
+            osc.start()
+            osc.stop(audioCtx.currentTime + 0.4)
+          }
+          burst()
+          ringTimer = setInterval(burst, 2000)
+        } catch {
+          // No audio without a user gesture first; the banner still shows.
+        }
+      }
+      function stopRinging() {
+        clearInterval(ringTimer)
+        ringTimer = null
+      }
+
+      function showIncoming(payload) {
+        incoming = payload
+        el('inbound-who').textContent = payload.prospectName ? `${payload.prospectName} is calling` : 'Incoming call'
+        el('inbound-from').textContent = `${payload.from} · ${payload.prospectId ?? 'no matching contact'}`
+        el('inbound').hidden = false
+        startRinging()
+      }
+      function hideIncoming() {
+        incoming = null
+        el('inbound').hidden = true
+        stopRinging()
+      }
+
+      el('inbound-answer').addEventListener('click', async () => {
+        await run('answerIncoming', dialer.answerIncoming())
+        hideIncoming()
+      })
+      el('inbound-ignore').addEventListener('click', async () => {
+        await run('ignoreIncoming', dialer.ignoreIncoming())
+        hideIncoming()
+      })
+
+      /* ------------------------------------------------------------ audio */
+
+      function renderDevices(devices) {
+        const fill = (select, list, selected) => {
+          select.innerHTML = list.map((d) => `<option value="${d.id}">${d.label}</option>`).join('')
+          if (selected) select.value = selected
+        }
+        fill(el('mic'), devices.microphones, devices.selected?.microphoneId)
+        fill(el('speaker'), devices.speakers, devices.selected?.speakerId)
+      }
+
+      async function loadDevices() {
+        const devices = await run('audio.list', dialer.audio.list())
+        if (devices) renderDevices(devices)
+      }
+
+      el('mic').addEventListener('change', () =>
+        run('audio.set', dialer.audio.set({ microphoneId: el('mic').value }))
+      )
+      el('speaker').addEventListener('change', () =>
+        run('audio.set', dialer.audio.set({ speakerId: el('speaker').value }))
+      )
+
+      /* --------------------------------------------------------- warnings */
+
+      function renderWarnings() {
+        el('warnings').innerHTML = dialer
+          ? [...dialer.warnings]
+              .map(([code, message]) => `<li><code>${code}</code>${message}</li>`)
+              .join('')
+          : ''
+      }
+
+      /* ---------------------------------------------------------- sign-in */
+
+      el('open-signin').addEventListener('click', () => {
+        // From the click, or the browser blocks the tab.
+        try {
+          dialer.openSignIn()
+        } catch (err) {
+          log(err.code, { message: err.message }, 'err')
+        }
+      })
+      el('silent-signin').addEventListener('click', () =>
+        run('signIn', dialer.signIn({ code: el('signin-code').value.trim() }))
+      )
+
+      /* ------------------------------------------------------------ mount */
+
+      el('target').textContent = new URL(APP_URL).host
+      el('mode').value = mode
+      el('stub-controls').hidden = !IS_STUB
+
+      function mount() {
+        // create() hands back the client before the frame exists, so the
+        // sign-in and warning handlers are in place for the first thing it
+        // says. mount() then resolves on ready.
+        dialer = SymboDialer.create({
           container: el('dialer-slot'),
           appUrl: APP_URL,
+          mode,
         })
+        el('dialer-slot').classList.toggle('hidden-mode', mode === 'hidden')
 
-        setStatus('Ready to dial', 'ok')
-        setDialable(true)
-      } catch (err) {
-        // The one you'll actually hit is MOUNT_TIMEOUT — a wrong appUrl, or an
-        // environment without the embed surface deployed.
-        setStatus(`${err.code}: ${err.message}`, 'bad')
-        log(err.code, { message: err.message }, true)
-      }
+        // Every event, logged. A real application listens to the few it
+        // needs; this shows the wildcard form.
+        dialer.on('*', (name, payload) => log(name, payload, name === 'error' ? 'err' : ''))
 
-      if (dialer) {
-        // Every event, logged. A real application would only listen to the two
-        // or three it cares about.
-        Object.values(EVENTS).forEach((type) => {
-          const name = type.replace(/^symbo:/, '')
-          dialer.on(name, (payload) => log(name, payload, name === 'error'))
-        })
-
-        // The dialer renders its own sign-in button, so it has to be visible
-        // for the user to get past this. Don't keep it collapsed by default.
         dialer.on('auth.required', () => {
-          setStatus('Waiting for sign-in inside the dialer', 'warn')
-          setDialable(false)
+          setStatus('Sign-in needed', 'warn')
+          el('signin').hidden = false
+          refreshButtons()
         })
 
         dialer.on('ready', () => {
-          setStatus('Ready to dial', 'ok')
-          setDialable(true)
+          setStatus(`Ready · ${dialer.user?.name ?? 'signed in'} · ${dialer.concurrentCalls ?? '?'} line(s)`, 'ok')
+          el('signin').hidden = true
+          refreshButtons()
+          renderWarnings()
+          if (dialer.deviceReady) loadDevices()
         })
+        dialer.on('device.ready', loadDevices)
+        dialer.on('audio.devicesChanged', renderDevices)
 
-        // A call can arrive while we have the dialer hidden, and the user
-        // needs to see it to answer.
-        dialer.on('call.incoming', () => setDialerVisible(true))
+        dialer.on('warning', renderWarnings)
+        dialer.on('warning.cleared', renderWarnings)
 
-        // The partner owns the layout, so it has to react to the size the
-        // dialer asks for.
-        dialer.on('resize', ({ height }) => {
-          el('dialer-slot').style.minHeight = height ? `${height}px` : '0px'
+        // ---- the session, as the queue table sees it
+        dialer.on('session.started', ({ dialSessionId }) => {
+          session = { dialSessionId, rows: new Map() }
+          hideWrap()
+          loadQueue()
+          refreshButtons()
         })
-
-        callButtons.forEach((btn) =>
-          btn.addEventListener('click', async () => {
-            const record = CASES.find((c) => c.ref === btn.dataset.ref)
-            try {
-              await dialer.dial({
-                number: record.number,
-                externalId: record.ref,
-                externalObjectType: 'prospect',
-                fullName: record.name,
-              })
-            } catch (err) {
-              log(err.code, { message: err.message }, true)
-            }
-          })
+        dialer.on('session.queue.updated', ({ counts }) => renderCounts(counts))
+        dialer.on('session.leg.ringing', (leg) =>
+          setRow(leg.queuedCallId, { ...leg, status: 'dialing', label: ['Calling now', 'ringing'] })
         )
-
-        // The ad-hoc path: a number the partner holds no record for. Nothing
-        // is passed as externalId, so compare the events this produces with
-        // the ones from the buttons above — same call, but nothing tying it to
-        // a case, which is what externalId buys you.
-        el('adhoc').addEventListener('submit', (event) => {
-          event.preventDefault()
-
-          const number = el('adhoc-number').value.trim()
-          if (!number) return
-
-          // A refused dial rejects here — that is the point of the request id.
-          // Blockers like a missing outcome on the last call, or a dialer that
-          // is not set up, arrive as a catch on the call you wrote rather than
-          // an event you had to know to listen for.
-          dialer.dial({ number, dialImmediately: true }).catch((err) => {
-            log(err.code, { message: err.message }, true)
-          })
+        dialer.on('session.leg.answered', (leg) =>
+          setRow(leg.queuedCallId, { label: ['Answered', 'connected'] })
+        )
+        dialer.on('session.leg.connected', (leg) =>
+          setRow(leg.queuedCallId, { label: ['Connected', 'connected'] })
+        )
+        dialer.on('session.leg.ended', (leg) => {
+          const label = {
+            answered_elsewhere: ['Other line answered', ''],
+            no_answer: ['No answer', ''],
+            busy: ['Busy', ''],
+            cancelled: ['Cancelled', ''],
+            failed: ['Failed', 'bad'],
+            completed: ['Call ended', 'wrap'],
+          }[leg.reason] || [leg.reason, '']
+          setRow(leg.queuedCallId, { status: leg.reason === 'completed' ? 'attempted' : leg.reason === 'cancelled' ? 'cancelled' : 'attempted', label })
+        })
+        dialer.on('session.wrap', (payload) => {
+          setRow(payload.queuedCallId, { label: ['Log call outcome', 'wrap'] })
+          showWrap(payload)
+        })
+        dialer.on('session.paused', () => setStatus('Session paused', 'ok'))
+        dialer.on('session.resumed', () => setStatus('Session dialing', 'ok'))
+        dialer.on('session.noMoreCalls', () => setStatus('Queue exhausted', 'ok'))
+        dialer.on('session.ended', ({ counts }) => {
+          setStatus(`Session complete · ${counts?.completed ?? 0} conversations`, 'ok')
+          session = null
+          hideWrap()
+          renderCounts(null)
+          refreshButtons()
         })
 
-        el('hangup').addEventListener('click', () => dialer.hangUp())
+        // ---- inbound
+        dialer.on('call.incoming', showIncoming)
+        dialer.on('call.ended', ({ callId }) => {
+          if (incoming?.callId === callId) hideIncoming()
+        })
 
-        el('toggle').addEventListener('click', () =>
-          setDialerVisible(el('dialer-slot').hidden)
-        )
+        // ---- one-off and inbound calls end here
+        //
+        // A call outside a session has no outcome form in the frame and no
+        // command to save one: this is where a real page would show its own
+        // wrap-up and post the outcome from its server. Nothing else follows
+        // in the page — no call.completed.
+        dialer.on('call.wrap', ({ callId, answered, durationSeconds }) => {
+          // A session's calls are wrapped through the panel above.
+          if (session) return
+          setStatus(
+            `Call ended · ${answered ? 'answered' : 'no answer'} · ${durationSeconds}s — your server saves the outcome: PUT /calls/${callId}`,
+            'warn'
+          )
+        })
+
+        refreshButtons()
+
+        dialer.mount().catch((err) => {
+          // The one you'll actually hit is MOUNT_TIMEOUT — a wrong appUrl, or
+          // an environment without the embed surface deployed.
+          setStatus(`${err.code}: ${err.message}`, 'bad')
+          log(err.code, { message: err.message }, 'err')
+        })
       }
+
+      function remount() {
+        dialer?.destroy()
+        dialer = null
+        session = null
+        hideWrap()
+        hideIncoming()
+        renderCounts(null)
+        el('warnings').innerHTML = ''
+        el('signin').hidden = true
+        setStatus('Starting…')
+        mount()
+      }
+
+      mount()
+
+      /* --------------------------------------------------------- controls */
+
+      el('s-start').addEventListener('click', () =>
+        run('session.start', dialer.session.start({ dialSessionId: el('session-id').value.trim() }))
+      )
+      el('s-pause').addEventListener('click', () => run('session.pause', dialer.session.pause()))
+      el('s-resume').addEventListener('click', () => run('session.resume', dialer.session.resume()))
+      el('s-skip').addEventListener('click', () => run('session.skipCurrent', dialer.session.skipCurrent()))
+      el('s-end').addEventListener('click', () =>
+        run('session.end', dialer.session.end({ force: el('s-force').checked }))
+      )
+      el('hangup').addEventListener('click', () => run('hangUp', dialer.hangUp()))
+
+      el('queue').addEventListener('click', async (event) => {
+        const id = event.target.dataset?.remove
+        if (!id) return
+        const data = await run('session.removeQueued', dialer.session.removeQueued(id))
+        if (data) setRow(id, { status: 'removed', label: null })
+      })
+
+      el('contacts').addEventListener('click', (event) => {
+        const prospectId = event.target.dataset?.prospect
+        if (!prospectId) return
+        run('dial', dialer.dial({ prospectId }))
+      })
+
+      // A number the partner holds no record for: nothing to attribute it to
+      // until Symbo recognises it (contact.matched).
+      el('adhoc').addEventListener('submit', (event) => {
+        event.preventDefault()
+        const number = el('adhoc-number').value.trim()
+        if (number) run('dial', dialer.dial({ number, dialImmediately: true }))
+      })
+
+      // Switching modes is a remount: the frame URL carries the mode.
+      el('mode').addEventListener('change', () => {
+        mode = el('mode').value
+        query.set('mode', mode)
+        history.replaceState(null, '', `?${query}`)
+        remount()
+      })
 
       el('destroy').addEventListener('click', () => {
         dialer?.destroy()
-        setStatus('Destroyed. Reload to start again.')
-        setDialable(false)
-        el('destroy').disabled = true
+        dialer = null
+        setStatus('Destroyed. Reload, or switch mode, to start again.')
+        refreshButtons()
       })
+
+      // Demo-only pokes at the stub. Not part of the SDK.
+      const pokeStub = (type) =>
+        el('dialer-slot').querySelector('iframe')?.contentWindow.postMessage({ type }, '*')
+      el('stub-inbound').addEventListener('click', () => pokeStub('stub:ringInbound'))
+      el('stub-blip').addEventListener('click', () => pokeStub('stub:realtimeBlip'))
+      el('stub-signout').addEventListener('click', () => pokeStub('stub:signOut'))
     </script>
   </body>
 </html>
