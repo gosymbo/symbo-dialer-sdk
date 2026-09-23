@@ -1,0 +1,1338 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Power Dial — Symbo embed reference</title>
+
+    <!--
+      A single-file reference integration for the Symbo embedded dialer.
+
+      What it shows
+        · redirect sign-in (openSignIn) — no token server, no JWKS, no backend
+        · starting a dial session built in Symbo, by its id
+        · driving it: pause, resume, skip, hang up, save an outcome, end
+        · Queued / Attempted / Completed buckets, the way Symbo shows them
+
+      Run it, from this repo
+        npm install && npm run build && npm run serve
+        → http://localhost:3000/example/power-dial.html
+
+      Run it anywhere else
+        Copy symbo-dialer.min.js (npm run build) next to this file and serve
+        the folder — python3 -m http.server 8010 — then open
+        http://localhost:8010/power-dial.html
+        The origin you serve it from must be allow-listed for your Symbo org.
+
+      Try it with no Symbo account
+        Point the app URL at this repo's offline frame:
+        http://localhost:3000/example/stub
+
+      Query params
+        ?mode=compact|hidden|widget   how much of Symbo's own UI is rendered
+        ?sdk=<url>                    load the SDK from somewhere else
+
+      The API token box only loads your org's call outcomes, for the wrap-up
+      panel. In production that token lives on your server, which also builds
+      the sessions; the page is only ever handed a dial session id.
+    -->
+
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --card: #fff;
+        --ink: #14161c;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --accent: #5b5bd6;
+        --queued: #94a3b8;
+        --progress: #2563eb;
+        --attempted: #d97706;
+        --completed: #059669;
+        --live: #dc2626;
+        --radius: 12px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          Helvetica, Arial, sans-serif;
+      }
+
+      h2,
+      h3 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      /* ------------------------------------------------------------- shell */
+
+      .bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 20px;
+        background: var(--card);
+        border-bottom: 1px solid var(--line);
+        position: sticky;
+        top: 0;
+        z-index: 5;
+      }
+
+      .brand {
+        font-weight: 650;
+        font-size: 16px;
+        margin-right: auto;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #eef0f6;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .pill.ok {
+        background: #e7f6ef;
+        color: var(--completed);
+      }
+
+      .pill.warn {
+        background: #fdf1e3;
+        color: var(--attempted);
+      }
+
+      .pill.bad {
+        background: #fdeaea;
+        color: var(--live);
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: 400px 1fr;
+        gap: 20px;
+        padding: 20px;
+        align-items: start;
+      }
+
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      /* ------------------------------------------------------------ inputs */
+
+      label {
+        display: block;
+        margin-bottom: 10px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      input,
+      select {
+        width: 100%;
+        margin-top: 4px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font: inherit;
+        background: #fff;
+        color: var(--ink);
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        padding: 8px 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        color: var(--ink);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .btn:hover:not(:disabled) {
+        border-color: #cbd0dc;
+      }
+
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      .btn.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      .btn.danger {
+        background: var(--live);
+        border-color: var(--live);
+        color: #fff;
+      }
+
+      /* Ending a session is destructive and irreversible, so it does not get
+         to look like the primary action. */
+      .btn.end {
+        margin-left: auto;
+        padding: 6px 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .btn.end:hover:not(:disabled) {
+        color: var(--live);
+        border-color: var(--live);
+      }
+
+      .hint {
+        font-size: 12px;
+        font-weight: 400;
+        color: var(--muted);
+      }
+
+      /* Every button that talks to Symbo shows it is working. */
+      .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        margin-right: 6px;
+        vertical-align: -2px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ------------------------------------------------------------- board */
+
+      .counts {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
+      .count {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 12px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .count b {
+        color: var(--ink);
+      }
+
+      .cols {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+      }
+
+      @media (max-width: 1280px) {
+        .cols {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+
+      @media (max-width: 620px) {
+        .cols {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .col {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 14px;
+        min-height: 180px;
+      }
+
+      .col h3 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .chip {
+        background: #eef0f6;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .col[data-bucket='queued'] h3 {
+        color: var(--queued);
+      }
+
+      .col[data-bucket='progress'] h3 {
+        color: var(--progress);
+      }
+
+      .col[data-bucket='attempted'] h3 {
+        color: var(--attempted);
+      }
+
+      .col[data-bucket='completed'] h3 {
+        color: var(--completed);
+      }
+
+      .item {
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--queued);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        transition: border-color 0.2s;
+      }
+
+      .item[data-state='attempted'] {
+        border-left-color: var(--attempted);
+      }
+
+      .item[data-state='ringing'] {
+        border-left-color: var(--progress);
+      }
+
+      .item[data-state='connected'] {
+        border-left-color: var(--live);
+        box-shadow: 0 0 0 3px #fdeaea;
+      }
+
+      .item[data-state='done'] {
+        border-left-color: var(--completed);
+      }
+
+      .item .nm {
+        font-weight: 600;
+      }
+
+      .item .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 2px;
+        font-size: 12px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .item .meta span {
+        white-space: nowrap;
+      }
+
+      .empty {
+        color: var(--muted);
+        font-size: 12px;
+        padding: 8px 0;
+      }
+
+      /* -------------------------------------------------------------- live */
+
+      .live {
+        position: sticky;
+        bottom: 0;
+        margin-top: 16px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+        display: flex;
+        gap: 14px;
+        align-items: center;
+        flex-wrap: wrap;
+        box-shadow: 0 -6px 20px rgba(20, 22, 28, 0.06);
+      }
+
+      .live[hidden],
+      .outcomes[hidden] {
+        display: none;
+      }
+
+      .live .who {
+        margin-right: auto;
+      }
+
+      .live .nm {
+        font-weight: 650;
+        font-size: 16px;
+      }
+
+      .timer {
+        font-variant-numeric: tabular-nums;
+        font-weight: 650;
+        color: var(--live);
+      }
+
+      .outcomes {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+
+      .outcomes .btn {
+        padding: 6px 10px;
+        font-size: 13px;
+      }
+
+      /* Never give the iframe a border or padding. With border-box that eats
+         into its viewport, Symbo's strip re-measures itself smaller, and the
+         resize round trip walks the frame down to nothing. The strip draws
+         its own card anyway. */
+      .slot {
+        margin-top: 12px;
+        overflow-x: auto;
+      }
+
+      details {
+        margin-top: 12px;
+      }
+
+      summary {
+        cursor: pointer;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      #log {
+        max-height: 220px;
+        overflow: auto;
+        margin: 10px 0 0;
+        font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--muted);
+        white-space: pre-wrap;
+      }
+
+      #log b {
+        color: var(--ink);
+      }
+
+      .err {
+        color: var(--live);
+        font-size: 12px;
+        margin-top: 8px;
+        min-height: 18px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <header class="bar">
+      <div class="brand">Power Dial</div>
+      <span class="hint" id="who">not connected</span>
+      <span class="pill" id="pill">offline</span>
+      <button class="btn primary" id="signin" hidden>Sign in to Symbo</button>
+    </header>
+
+    <main>
+      <div>
+        <section class="card">
+          <h2>1 · Connect</h2>
+          <label
+            >Symbo app URL<input id="appUrl" spellcheck="false"
+          /></label>
+          <label>Symbo API URL<input id="apiUrl" spellcheck="false" /></label>
+          <label
+            >API token
+            <span class="hint">· only used to load your call outcomes</span>
+            <input id="token" type="password" autocomplete="off"
+          /></label>
+          <div class="row">
+            <button class="btn primary" id="connect">Connect</button>
+            <button class="btn" id="disconnect" hidden>Disconnect</button>
+          </div>
+          <div class="err" id="connectErr"></div>
+          <div class="slot" id="slot"></div>
+        </section>
+
+        <section class="card">
+          <h2>2 · Dial session</h2>
+          <p class="hint" style="margin-top: 0">
+            Build the list in Symbo — contacts, order, lines — then paste the
+            session id here.
+          </p>
+          <label
+            >Dial session id<input id="existing" placeholder="paste it here"
+          /></label>
+          <div class="row">
+            <button class="btn primary" id="start" disabled>
+              Start dialing
+            </button>
+          </div>
+          <div class="err" id="startErr"></div>
+        </section>
+      </div>
+
+      <div>
+        <div class="counts" id="counts"></div>
+
+        <div class="card row">
+          <button class="btn" id="pause" disabled>Pause</button>
+          <button class="btn" id="resume" disabled>Resume</button>
+          <button class="btn" id="skip" disabled>Skip current</button>
+          <button class="btn" id="hangup" disabled>Hang up</button>
+          <button
+            class="btn end"
+            id="end"
+            disabled
+            title="End the session — Symbo marks it completed"
+          >
+            ✕ End
+          </button>
+          <span class="hint" id="sessionState">no session</span>
+          <span class="err" id="controlErr"></span>
+        </div>
+
+        <div class="cols">
+          <div class="col" data-bucket="queued">
+            <h3>Queued</h3>
+            <div id="b-queued"><p class="empty">Nothing queued yet.</p></div>
+            <p class="hint" id="queued-more"></p>
+          </div>
+          <div class="col" data-bucket="progress">
+            <h3>In progress <span class="chip" id="c-progress">0</span></h3>
+            <div id="b-progress"><p class="empty">No lines up.</p></div>
+          </div>
+          <div class="col" data-bucket="attempted">
+            <h3>Attempted <span class="chip" id="c-attempted">0</span></h3>
+            <div id="b-attempted"><p class="empty">Nobody dialed yet.</p></div>
+          </div>
+          <div class="col" data-bucket="completed">
+            <h3>Completed <span class="chip" id="c-completed">0</span></h3>
+            <div id="b-completed"><p class="empty">Nothing finished yet.</p></div>
+          </div>
+        </div>
+
+        <section class="live" id="live" hidden>
+          <div class="who">
+            <div class="nm" id="liveName"></div>
+            <div class="hint" id="liveNumber"></div>
+          </div>
+          <span class="timer" id="liveTimer"></span>
+          <span class="pill" id="liveState"></span>
+          <div class="outcomes" id="outcomes" hidden></div>
+          <div class="err" id="liveErr"></div>
+        </section>
+
+        <details class="card" open>
+          <summary>Events from Symbo</summary>
+          <div id="log"></div>
+        </details>
+      </div>
+    </main>
+
+    <script type="module">
+      /* ----------------------------------------------------------- the SDK */
+
+      const $ = (id) => document.getElementById(id)
+
+      const params = new URLSearchParams(location.search)
+      const MODE = params.get('mode') || 'compact'
+      // Beside this file when it has been copied out on its own, or this
+      // repo's build when it is still sitting in example/. The build on npm
+      // today has no power-dial support, so `?sdk=` should only point at a
+      // CDN once a release with sessions in it is out.
+      const SDK_SOURCES = params.get('sdk')
+        ? [params.get('sdk')]
+        : ['./symbo-dialer.min.js', '../dist/symbo-dialer.min.js']
+
+      const loadScript = (src) =>
+        new Promise((resolve, reject) => {
+          const tag = document.createElement('script')
+          tag.src = src
+          tag.onload = resolve
+          tag.onerror = () => reject(new Error(src))
+          document.head.appendChild(tag)
+        })
+
+      let loaded = false
+      for (const src of SDK_SOURCES) {
+        try {
+          await loadScript(src)
+          loaded = true
+          break
+        } catch {
+          // try the next one
+        }
+      }
+
+      if (!loaded) {
+        const tried = SDK_SOURCES.join(' or ')
+        $('connectErr').textContent = `Could not load the Symbo SDK from ${tried}`
+        throw new Error('symbo sdk not loaded')
+      }
+
+      const { SymboDialer } = window
+
+      /* ------------------------------------------------------------- state */
+
+      // One row per queued call. `queuedCallId` is the key Symbo uses in every
+      // session event, so it is the key this board uses too.
+      const rows = new Map()
+
+      let dialer = null
+      let outcomes = []
+      let dialSessionId = null
+      let wrap = null
+      let liveId = null
+      let skippedId = null
+      let ticker = null
+
+      const cfg = {
+        appUrl: 'https://app.symbo.ai',
+        apiUrl: 'https://api.symbo.ai',
+        token: '',
+        ...JSON.parse(localStorage.getItem('symbo-power-dial') || '{}'),
+      }
+
+      const saveCfg = () => {
+        cfg.appUrl = $('appUrl').value.trim()
+        cfg.apiUrl = $('apiUrl').value.trim().replace(/\/$/, '')
+        cfg.token = $('token').value.trim()
+        localStorage.setItem('symbo-power-dial', JSON.stringify(cfg))
+      }
+
+      $('appUrl').value = cfg.appUrl
+      $('apiUrl').value = cfg.apiUrl
+      $('token').value = cfg.token
+
+      /* --------------------------------------------------------- your REST */
+      /* In production this lives on your server, not in the page. */
+
+      async function api(path, options = {}) {
+        const res = await fetch(cfg.apiUrl + path, {
+          ...options,
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${cfg.token}`,
+            ...options.headers,
+          },
+        })
+        const body = await res.json().catch(() => null)
+        if (!res.ok) {
+          throw new Error(
+            body?.error?.message || body?.message || `${res.status} on ${path}`
+          )
+        }
+        return body
+      }
+
+      /* ------------------------------------------------------------ connect */
+
+      $('connect').onclick = () =>
+        withSpinner($('connect'), async () => {
+          saveCfg()
+          $('connectErr').textContent = ''
+
+          dialer = SymboDialer.create({
+            container: $('slot'),
+            appUrl: cfg.appUrl,
+            mode: MODE,
+          })
+
+          wireEvents(dialer)
+          syncControls()
+
+          // Stop spinning the moment Symbo answers — ready, or a prompt to
+          // sign in. mount() only settles once the rep IS signed in, which
+          // is their own pace, not ours.
+          const answered = new Promise((resolve) => {
+            dialer.once('ready', resolve)
+            dialer.once('auth.required', resolve)
+          })
+
+          const mounted = dialer.mount().catch((error) => {
+            $('connectErr').textContent = `${error.code || 'ERROR'} — ${error.message}`
+            dialer?.destroy()
+            dialer = null
+            syncControls()
+          })
+
+          await Promise.race([answered, mounted])
+        })
+
+      $('disconnect').onclick = () => {
+        dialer?.destroy()
+        dialer = null
+        rows.clear()
+        dialSessionId = null
+        $('counts').innerHTML = ''
+        $('sessionState').textContent = 'no session'
+        syncControls()
+        closeLive()
+        render()
+        setPill('offline')
+        $('who').textContent = 'not connected'
+        $('disconnect').hidden = true
+        $('signin').hidden = true
+      }
+
+      // Redirect sign-in: Symbo asks, we show a button, the rep signs in on
+      // Symbo's own page in a new tab. No token server, no JWKS.
+      $('signin').onclick = () => {
+        try {
+          dialer.openSignIn()
+        } catch (error) {
+          $('connectErr').textContent = error.message
+        }
+      }
+
+      function wireEvents(d) {
+        d.on('auth.required', () => {
+          setPill('signed out', 'warn')
+          $('signin').hidden = false
+          log('auth.required', {})
+        })
+
+        d.on('ready', (payload) => {
+          $('signin').hidden = true
+          $('disconnect').hidden = false
+          $('who').textContent = `${payload.user?.name || 'rep'} · ${
+            payload.organization?.name || ''
+          }`
+          setPill(
+            payload.deviceReady ? 'ready' : 'device not ready',
+            payload.deviceReady ? 'ok' : 'warn'
+          )
+          syncControls()
+          if (!payload.powerDialing) {
+            $('connectErr').textContent =
+              'Power dialing is not enabled for this organization.'
+          }
+          loadOutcomes()
+          adoptActiveSession()
+          log('ready', payload)
+        })
+
+        d.on('device.ready', () => setPill('ready', 'ok'))
+        d.on('device.error', () => setPill('device error', 'bad'))
+        d.on('permission.denied', () => setPill('no microphone', 'bad'))
+        d.on('warning', (p) => log('warning', p))
+        d.on('warning.cleared', (p) => log('warning.cleared', p))
+        d.on('error', (p) => log('error', p))
+
+        /* ------------------------------------------------------- session */
+
+        d.on('session.started', (p) => {
+          dialSessionId = p.dialSessionId
+          $('sessionState').textContent = `dialing · ${p.concurrentCalls} line(s)`
+          syncControls()
+          reconcile()
+          log('session.started', p)
+        })
+
+        d.on('session.paused', (p) => {
+          $('sessionState').textContent = `paused · ${p.reason}`
+          log('session.paused', p)
+        })
+
+        d.on('session.resumed', (p) => {
+          $('sessionState').textContent = 'dialing'
+          log('session.resumed', p)
+        })
+
+        d.on('session.noMoreCalls', (p) => {
+          $('sessionState').textContent = 'queue empty'
+          log('session.noMoreCalls', p)
+        })
+
+        d.on('session.ended', (p) => {
+          $('sessionState').textContent = 'ended'
+          dialSessionId = null
+          syncControls()
+          showCounts(p.counts)
+          closeLive()
+          log('session.ended', p)
+        })
+
+        // The engine rings several lines at once, so several rows can be in
+        // flight together. Key every one of them on queuedCallId.
+        d.on('session.leg.ringing', (p) => {
+          upsert(p, { live: true, state: 'ringing' })
+          render()
+          log('session.leg.ringing', p)
+        })
+
+        d.on('session.leg.answered', (p) => {
+          upsert(p, { live: true, state: 'answered' })
+          render()
+          log('session.leg.answered', p)
+        })
+
+        d.on('session.leg.connected', (p) => {
+          upsert(p, { live: true, state: 'connected', callId: p.callId })
+          openLive(rows.get(p.queuedCallId))
+          render()
+          log('session.leg.connected', p)
+        })
+
+        d.on('session.leg.ended', (p) => {
+          // Where the contact goes now:
+          //
+          //   the rep talked on it  → stays put until the outcome is saved,
+          //                           because that save is what finishes it
+          //   skipped mid-call      → finished; skipCurrent() skips the
+          //                           outcome, not the call
+          //   anything else         → an attempt: no answer, busy, a carrier
+          //                           failure, another line getting there
+          //                           first, or the leg cancelled under it
+          //
+          // (Symbo's own tabs file `cancelled` under Completed; this board
+          // keeps it with the other unanswered attempts.)
+          const was = rows.get(p.queuedCallId)?.state
+          const wasOnTheLine = was === 'connected' || was === 'answered'
+          const skipped = p.queuedCallId === skippedId && wasOnTheLine
+          if (skipped) skippedId = null
+
+          const talked = !skipped && p.reason === 'completed'
+          upsert(p, {
+            live: false,
+            state: 'done',
+            reason: p.reason,
+            bucket: skipped ? 'completed' : talked ? 'progress' : 'attempted',
+            outcomeNeeded: talked,
+          })
+          // Only the leg the rep was on closes the live bar; the other lines
+          // in the round end too and must not take it down with them.
+          if (p.queuedCallId === liveId) {
+            liveId = null
+            clearInterval(ticker)
+            // 'completed' means the rep hung up — the wrap-up is next.
+            if (p.reason !== 'completed') $('live').hidden = true
+          }
+          render()
+          reconcile()
+          log('session.leg.ended', p)
+        })
+
+        d.on('session.wrap', (p) => {
+          // skipCurrent() means "hang up and skip its outcome", so the wrap
+          // it produces is not a question — the contact is simply done.
+          const skipped = p.queuedCallId === skippedId
+          skippedId = null
+
+          const settled = skipped || !p.outcomeRequired
+          upsert(p, {
+            live: false,
+            state: 'done',
+            callId: p.callId,
+            outcomeNeeded: !settled,
+            ...(settled ? { bucket: 'completed' } : {}),
+          })
+
+          if (settled) closeLive()
+          else {
+            wrap = p
+            openWrap(p)
+          }
+
+          render()
+          log('session.wrap', p)
+        })
+
+        // Never reconcile from this one: Symbo's getQueue() refreshes the
+        // counts, which announces a queue change, which would call getQueue()
+        // again — forever. The counts it carries are enough.
+        d.on('session.queue.updated', (p) => {
+          showCounts(p.counts)
+          log('session.queue.updated', p)
+        })
+
+        d.on('session.admin', (p) => log('session.admin', p))
+
+        d.on('call.completed', (p) => {
+          const row = [...rows.values()].find((r) => r.callId === p.callId)
+          if (row) {
+            row.outcome = p.outcome?.name || p.outcome || 'saved'
+            row.outcomeNeeded = false
+          }
+          render()
+          log('call.completed', p)
+        })
+      }
+
+      /* ------------------------------------------------------------ rows */
+
+      function upsert(payload, patch = {}) {
+        const id = payload.queuedCallId
+        if (!id) return null
+        const row = rows.get(id) || {
+          queuedCallId: id,
+          bucket: 'queued',
+          attempts: 0,
+          live: false,
+          state: '',
+        }
+        row.prospectId = payload.prospectId ?? row.prospectId
+        row.name = payload.prospectName || row.name || 'Contact'
+        row.number = payload.number || row.number || ''
+        Object.assign(row, patch)
+        if (row.live) row.bucket = 'progress'
+        rows.set(id, row)
+        return row
+      }
+
+      /**
+       * The statuses getQueue() can answer with, and their column.
+       *
+       * It serves Symbo's Queued tab — `queued`, `dialing`, `in_progress` —
+       * and nothing else, so nothing else is read from it. `dialing` is a
+       * leg ringing and `in_progress` one the rep is on the line for, which
+       * is why In progress is its own column here.
+       *
+       * The other statuses never arrive this way: `attempted` / `failed`
+       * (dialed, nobody talked), `completed` (the rep talked), `cancelled`
+       * (a ringing leg dropped when the session paused or ended — Symbo
+       * tabs it under Completed) and `removed` (in no tab at all). Those
+       * come from session.leg.ended instead.
+       */
+      const QUEUE_BUCKET = {
+        queued: 'queued',
+        dialing: 'progress',
+        in_progress: 'progress',
+      }
+
+      let reconcileTimer = null
+      let reconciling = false
+
+      // Symbo's `getQueue()` answers with the rows still waiting to be dialed.
+      // Everything else — retries, skips, finished calls — is inferred from
+      // what is no longer in it, which is how Symbo's own board works too.
+      function reconcile() {
+        clearTimeout(reconcileTimer)
+        reconcileTimer = setTimeout(async () => {
+          if (!dialer?.ready || !dialSessionId || reconciling) return
+          reconciling = true
+          let answer
+          try {
+            answer = await dialer.session.getQueue()
+          } catch {
+            return
+          } finally {
+            reconciling = false
+          }
+
+          // getQueue answers with the Queued tab's statuses — queued,
+          // dialing and in_progress — so it is authoritative for the first
+          // two columns and silent about the other two.
+          const stillListed = new Set()
+          answer.queue.forEach((queued) => {
+            stillListed.add(queued.queuedCallId)
+            const row = upsert(queued, { attempts: queued.attempts ?? 0 })
+            if (row.live || row.outcomeNeeded) return
+            const bucket = QUEUE_BUCKET[queued.status]
+            if (bucket) row.bucket = bucket
+          })
+
+          // Gone from that list and not on a line: Symbo has moved it to
+          // Attempted or Completed. Which one, only the leg that ended can
+          // say, so leave whatever `session.leg.ended` decided.
+          rows.forEach((row) => {
+            if (row.live || row.outcomeNeeded) return
+            if (stillListed.has(row.queuedCallId)) return
+            if (row.bucket === 'queued' || row.bucket === 'progress')
+              row.bucket = 'attempted'
+          })
+
+          showCounts(answer.counts)
+          render()
+        }, 250)
+      }
+
+      /* --------------------------------------------------------- rendering */
+
+      function render() {
+        const buckets = { queued: [], progress: [], attempted: [], completed: [] }
+        rows.forEach((row) => buckets[row.bucket]?.push(row))
+
+        Object.entries(buckets).forEach(([name, list]) => {
+          // Queued carries no count: getQueue() answers one page, so a total
+          // there would disagree with the cards under it.
+          $(`c-${name}`)?.replaceChildren(String(list.length))
+          $(`b-${name}`).innerHTML = list.length
+            ? list.map(card).join('')
+            : `<p class="empty">Nothing here.</p>`
+        })
+
+        const waiting = lastCounts?.queued ?? 0
+        $('queued-more').textContent =
+          waiting > buckets.queued.length
+            ? `showing ${buckets.queued.length} of ${waiting}`
+            : ''
+      }
+
+      // Grey queued, blue on a line, red while the rep is talking, amber
+      // once the attempt is over, green when the call actually happened.
+      const tone = (row) => {
+        if (row.live) return row.state === 'connected' ? 'connected' : 'ringing'
+        if (row.bucket === 'completed') return 'done'
+        if (row.bucket === 'attempted') return 'attempted'
+        return row.bucket === 'progress' ? 'ringing' : ''
+      }
+
+      const card = (row) => `
+        <article class="item" data-state="${tone(row)}">
+          <div class="nm">${escape(row.name)}</div>
+          <div class="meta">
+            <span>${escape(row.number || '')}</span>
+            ${row.attempts ? `<span>· attempt ${row.attempts}</span>` : ''}
+            ${row.state ? `<span>· ${escape(row.reason || row.state)}</span>` : ''}
+            ${row.outcome ? `<span>· ${escape(row.outcome)}</span>` : ''}
+            ${row.outcomeNeeded ? `<span>· outcome needed</span>` : ''}
+          </div>
+        </article>`
+
+      // The same four buckets as the columns, so the two can be read against
+      // each other. `cancelled` is counted separately by Symbo but has no
+      // bucket of its own, and a cancelled leg was never answered — so it is
+      // added to Attempted, where the board puts those rows.
+      let lastCounts = null
+
+      function showCounts(counts) {
+        if (!counts) return
+        lastCounts = counts
+        const chips = [
+          ['queued', counts.queued],
+          ['in progress', counts.dialing],
+          ['attempted', (counts.attempted || 0) + (counts.cancelled || 0)],
+          ['completed', counts.completed],
+          ['remaining', counts.remaining],
+        ]
+        if (counts.removed) chips.push(['removed', counts.removed])
+
+        $('counts').innerHTML = chips
+          .map(
+            ([name, value]) =>
+              `<span class="count">${name} <b>${value ?? 0}</b></span>`
+          )
+          .join('')
+      }
+
+      const escape = (value) =>
+        String(value ?? '').replace(
+          /[&<>"]/g,
+          (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]
+        )
+
+      /* -------------------------------------------------------- the live bar */
+
+      function openLive(row) {
+        if (!row) return
+        liveId = row.queuedCallId
+        $('live').hidden = false
+        $('liveName').textContent = row.name
+        $('liveNumber').textContent = row.number
+        $('liveState').textContent = 'connected'
+        $('liveState').className = 'pill bad'
+        $('outcomes').hidden = true
+        $('liveErr').textContent = ''
+
+        const started = Date.now()
+        clearInterval(ticker)
+        ticker = setInterval(() => {
+          const seconds = Math.floor((Date.now() - started) / 1000)
+          $('liveTimer').textContent = `${String(Math.floor(seconds / 60)).padStart(
+            2,
+            '0'
+          )}:${String(seconds % 60).padStart(2, '0')}`
+        }, 500)
+      }
+
+      function closeLive() {
+        liveId = null
+        wrap = null
+        clearInterval(ticker)
+        $('liveTimer').textContent = ''
+        $('live').hidden = true
+      }
+
+      // Symbo pauses the engine until the outcome is saved, so this panel is
+      // the thing that keeps the session moving.
+      function openWrap(payload) {
+        clearInterval(ticker)
+        $('live').hidden = false
+        $('liveName').textContent =
+          rows.get(payload.queuedCallId)?.name || 'Last call'
+        $('liveNumber').textContent = `${
+          payload.answered ? 'answered' : 'not answered'
+        } · ${payload.durationSeconds || 0}s`
+        $('liveState').textContent = payload.outcomeRequired
+          ? 'outcome needed'
+          : 'wrapping up'
+        $('liveState').className = 'pill warn'
+        $('liveTimer').textContent = ''
+
+        // Symbo refuses `resume` while a call still owes an outcome, so the
+        // only way on from here is to save one.
+        const buttons = outcomes.map(
+          (outcome) =>
+            `<button class="btn" data-outcome="${outcome.id}">${escape(
+              outcome.name
+            )}</button>`
+        )
+        if (!payload.outcomeRequired) {
+          buttons.push(`<button class="btn primary" data-outcome="">Next contact</button>`)
+        }
+        if (payload.outcomeRequired && !outcomes.length) {
+          $('liveErr').textContent =
+            'No outcomes loaded — add your API token and press "Load from Symbo".'
+        }
+
+        $('outcomes').hidden = false
+        $('outcomes').innerHTML = buttons.join('')
+
+        const buttonEls = [...$('outcomes').querySelectorAll('button')]
+        buttonEls.forEach((button) => {
+          button.onclick = () =>
+            withSpinner(button, async () => {
+              // One outcome at a time, or a double-click saves twice.
+              buttonEls.forEach((other) => (other.disabled = true))
+              try {
+                await saveOutcome(button.dataset.outcome)
+              } finally {
+                buttonEls.forEach((other) => (other.disabled = false))
+              }
+            })
+        })
+      }
+
+      async function saveOutcome(outcomeId) {
+        $('liveErr').textContent = ''
+        try {
+          if (outcomeId) {
+            await dialer.session.saveOutcome({
+              callId: wrap.callId,
+              outcomeId,
+              then: 'resume',
+            })
+          } else {
+            await dialer.session.resume()
+          }
+          const row = rows.get(wrap.queuedCallId)
+          if (row) {
+            row.outcomeNeeded = false
+            row.bucket = 'completed'
+          }
+          wrap = null
+          $('outcomes').hidden = true
+          $('live').hidden = true
+          reconcile()
+        } catch (error) {
+          $('liveErr').textContent = `${error.code || 'ERROR'} — ${error.message}`
+        }
+      }
+
+      /* ---------------------------------------------------------- controls */
+
+      /**
+       * Run a button's action with a spinner on it. Symbo answers over a
+       * postMessage round trip and, behind that, an HTTP call — long enough
+       * that a button which does nothing visible invites a second click.
+       */
+      async function withSpinner(button, run) {
+        if (button.dataset.busy) return
+        button.dataset.busy = '1'
+
+        const label = button.textContent
+        const spinner = document.createElement('span')
+        spinner.className = 'spinner'
+        button.style.minWidth = `${button.getBoundingClientRect().width}px`
+        button.textContent = ''
+        button.append(spinner, label)
+        button.disabled = true
+
+        try {
+          return await run()
+        } finally {
+          delete button.dataset.busy
+          button.textContent = label
+          button.style.minWidth = ''
+          syncControls()
+        }
+      }
+
+      /** One place decides what is clickable, so nothing goes out of step. */
+      function syncControls() {
+        const running = !!dialSessionId
+        const enable = (id, on) =>
+          ($(id).disabled = !!$(id).dataset.busy || !on)
+
+        enable('connect', !dialer)
+        enable('start', !!dialer?.ready && !!$('existing').value.trim() && !running)
+        ;['pause', 'resume', 'skip', 'hangup', 'end'].forEach((id) =>
+          enable(id, running)
+        )
+      }
+
+      // Wire a session command: spinner while it runs, refusal into `errId`.
+      const command = (id, errId, fn) => {
+        $(id).onclick = () =>
+          withSpinner($(id), async () => {
+            $(errId).textContent = ''
+            try {
+              await fn()
+            } catch (error) {
+              $(errId).textContent = `${error.code || 'ERROR'} — ${error.message}`
+            }
+          })
+      }
+
+      /**
+       * If the rep already has a session running — started in Symbo, or left
+       * going from earlier — pick it up instead of asking for the id. The
+       * frame fetches it on load, so it can land a moment after `ready`.
+       */
+      async function adoptActiveSession() {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          if (!dialer?.ready || dialSessionId) return
+
+          let state
+          try {
+            state = await dialer.getState()
+          } catch {
+            return
+          }
+
+          const session = state?.session
+          if (session?.dialSessionId) {
+            dialSessionId = session.dialSessionId
+            $('existing').value = session.dialSessionId
+            $('sessionState').textContent = `${
+              session.status || 'running'
+            } · picked up from Symbo`
+            showCounts(session.counts)
+            // Lines already in the air belong on the board straight away.
+            ;(session.legs || []).forEach((leg) =>
+              upsert(leg, {
+                live: true,
+                state: leg.status || 'ringing',
+                callId: leg.callId,
+              })
+            )
+            syncControls()
+            render()
+            reconcile()
+            return
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+      }
+
+      $('existing').oninput = syncControls
+
+      // The queue comes from Symbo once the session starts, so the board
+      // starts empty and `session.started` fills it.
+      command('start', 'startErr', async () => {
+        rows.clear()
+        render()
+        await dialer.session.start({ dialSessionId: $('existing').value.trim() })
+      })
+
+      const untilLegEnds = (queuedCallId, ms = 8000) =>
+        new Promise((resolve) => {
+          if (!queuedCallId) return resolve()
+          const stop = () => {
+            clearTimeout(timer)
+            off()
+            resolve()
+          }
+          const off = dialer.on('session.leg.ended', (p) => {
+            if (p.queuedCallId === queuedCallId) stop()
+          })
+          const timer = setTimeout(stop, ms)
+        })
+
+      command('pause', 'controlErr', () => dialer.session.pause())
+      command('resume', 'controlErr', () => dialer.session.resume())
+      command('skip', 'controlErr', async () => {
+        const leg = (skippedId = liveId)
+        await dialer.session.skipCurrent()
+        await untilLegEnds(leg)
+      })
+
+      command('hangup', 'controlErr', async () => {
+        const leg = liveId
+        await dialer.hangUp()
+        await untilLegEnds(leg)
+      })
+      command('end', 'controlErr', () => {
+        if (!confirm('End this dial session? Symbo marks it completed.')) return
+        return dialer.session.end({ force: true })
+      })
+
+      // The org's dispositions, so the wrap-up panel can offer them. This is
+      // the only thing the demo needs the API token for.
+      async function loadOutcomes() {
+        if (!cfg.token) return
+        try {
+          const picker = await api('/v1/callOutcomes?count=50')
+          outcomes = picker.data || []
+        } catch (error) {
+          $('connectErr').textContent = `Could not load outcomes — ${error.message}`
+        }
+      }
+
+      /* --------------------------------------------------------------- log */
+
+      function log(name, payload) {
+        const line = document.createElement('div')
+        line.innerHTML = `<b>${escape(name)}</b> ${escape(
+          JSON.stringify(payload).slice(0, 220)
+        )}`
+        $('log').prepend(line)
+        while ($('log').childElementCount > 80) $('log').lastElementChild.remove()
+      }
+
+      function setPill(text, mood = '') {
+        $('pill').textContent = text
+        $('pill').className = `pill ${mood}`
+      }
+    </script>
+  </body>
+</html>
