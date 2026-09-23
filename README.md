@@ -1,28 +1,48 @@
 # @symbo/dialer-embed
 
-Embed the Symbo dialer in your own application: one-off calls, inbound calls,
-and power-dial sessions that ring several contacts at once — all from your
-page, with Symbo's own dialer shown in full, reduced to a small status strip,
-or hidden entirely.
+Embed the Symbo dialer in your own application. The package covers two
+different integrations, and this README keeps them apart:
+
+- **The dialer widget.** Symbo's own dialer, in an iframe on your page. Your
+  page adds Call buttons; the keypad, the contact card, notes, the outcome
+  form and inbound ringing are all Symbo's. One-off calls, one at a time.
+- **The power dialer.** Symbo's engine rings several contacts at once from a
+  dial session your server created through the Symbo API, and your page
+  draws the whole experience — the queue, the wrap-up form, the inbound
+  banner — from events, with Symbo reduced to a status strip or hidden
+  entirely.
+
+Both use the same client; they differ in the `mode` you mount with and the
+commands you call. [Which one to build](#which-integration-are-you-building)
+is the first section below.
 
 ```bash
 npm install @symbo/dialer-embed
 ```
 
+The dialer widget, in full:
+
 ```js
 import { SymboDialer } from '@symbo/dialer-embed'
 
+const dialer = await SymboDialer.mount({
+  container: document.getElementById('symbo-dialer'), // Symbo's dialer renders here
+})
+callButton.onclick = () => dialer.dial({ prospectId: 'p-1001' })
+```
+
+The power dialer, in outline (the rest of this README fills it in):
+
+```js
 const dialer = SymboDialer.create({
   container: document.getElementById('symbo-dialer'),
-  mode: 'compact', // or 'widget' (the default) or 'hidden'
+  mode: 'compact', // a status strip; or 'hidden' for nothing at all
 })
+dialer.on('session.leg.ringing', lightUpRow)
+dialer.on('session.wrap', showYourWrapUp)
+await dialer.mount()
 
-dialer.on('auth.required', () => showSignInButton())
-dialer.on('warning', ({ code, message }) => showBanner(code, message))
-
-await dialer.mount() // resolves once someone is signed in and calls can be placed
-
-await dialer.dial({ prospectId: 'p-1001' })
+await dialer.session.start({ dialSessionId }) // a session your server created
 ```
 
 Not using a bundler? A script tag gives you the same thing on `window`:
@@ -35,12 +55,6 @@ Not using a bundler? A script tag gives you the same thing on `window`:
 </script>
 ```
 
-The SDK creates the iframe itself, with `allow="microphone; autoplay"` set, the
-target origin pinned, and the frame URL carrying the mode. Those are the things
-that are easy to get wrong by hand and fail in ways that are hard to diagnose,
-which is most of why this package exists rather than a page of copy-paste
-`postMessage`.
-
 > **Which Symbo release you need** is at the [end](#sdk-versions-and-symbo-releases).
 > The session, inbound, audio and sign-in commands in 0.2.0 need the Symbo
 > release that carries the power-dial embed; against an earlier one they
@@ -49,12 +63,13 @@ which is most of why this package exists rather than a page of copy-paste
 
 ## Contents
 
-- [Try it](#try-it)
+- [Which integration are you building?](#which-integration-are-you-building)
+- [How it fits together](#how-it-fits-together)
+- [The examples](#the-examples)
 - [Three modes: widget, compact and hidden](#three-modes-widget-compact-and-hidden)
 - [Signing in](#signing-in)
-- [Power-dial sessions](#power-dial-sessions)
-- [One-off calls](#one-off-calls)
-- [Inbound calls](#inbound-calls)
+- [The dialer widget](#the-dialer-widget)
+- [The power dialer](#the-power-dialer)
 - [Audio devices](#audio-devices)
 - [Warnings](#warnings)
 - [API](#api)
@@ -63,55 +78,122 @@ which is most of why this package exists rather than a page of copy-paste
 - [Hidden-mode checklist](#hidden-mode-checklist)
 - [SDK versions and Symbo releases](#sdk-versions-and-symbo-releases)
 
-## Try it
+## Which integration are you building?
 
-[**Open the live example**](https://gosymbo.github.io/symbo-dialer-sdk/example/)
-— a pretend collections tool with a queue that lights up as lines ring and
-connect, a wrap-up panel, an inbound banner, an audio-device picker, a
-mode switch and a live log of everything the dialer sends back.
+| | The dialer widget | The power dialer |
+| --- | --- | --- |
+| What the rep sees | Symbo's dialer, whole, in a 420×485 frame on your page | Your own screens; Symbo is a small status strip (`compact`) or invisible (`hidden`) |
+| What you build | A Call button per contact | The queue, the contact card, the wrap-up form, the inbound banner |
+| Where the session lives | — | In Symbo, on the rep's queue: the same dial session the Symbo app shows and can drive, created and edited through the Symbo API |
+| How calls are placed | One at a time, with `dialer.dial()` | Several lines at once by Symbo's engine, from a queue your server created with the Symbo API |
+| Outcomes and notes | Saved in Symbo's outcome form, inside the frame | Saved by your page with `session.saveOutcome()`, or by your server |
+| Inbound calls | The frame rings and answers | Your page rings and answers (`call.incoming`) |
+| Server side | None required | Sync contacts, create sessions, edit the queue, read calls back — the **Embedded Dialer** guide in the Symbo API docs |
+| Mount with | `mode: 'widget'` (the default) | `mode: 'compact'` or `'hidden'` |
+| SDK surface | `mount`, `dial`, `hangUp`, `setContact`, the `call.*` events | All of that, plus `session.*`, `signIn`, `answerIncoming`, `audio.*`, `getState`, the `session.*` events |
+| Example | [`example/index.html`](example/index.html) | [`example/collections.html`](example/collections.html) and [`example/power-dial.html`](example/power-dial.html) |
 
-The source is in [`example/`](example), and it runs locally too:
+Pick the **widget** when your application only needs a way to place a call and
+is happy for the call itself to happen in Symbo's UI: a CRM record with a Call
+button, a support console, an internal tool. It is the smallest integration
+there is, and the 0.1.x surface.
 
-```bash
-npm install
-npm run demo
-```
+Pick the **power dialer** when your reps work through lists inside your
+application and you want them to stay there while Symbo does the dialing.
+Symbo rings several contacts at once, connects the rep to whoever answers
+first, and handles the no-answers, retries and default outcomes for you; your
+application supplies the list and gets a page that shows which contacts are
+ringing, who answered, and a wrap-up for each conversation, all in your own
+screens. Your server creates the session through the Symbo API from contacts
+it has synced, can drop, re-queue or reschedule a contact while it runs, and
+reads every call back when it ends. The session itself lives in Symbo, on
+the rep's queue, so a manager can also see and manage it from the Symbo app.
+This integration needs a server side for the API calls and a page that draws
+the queue and the wrap-up.
 
-That serves the repo and opens the example, pointed at your Symbo account. It
-also ships a stub that plays the Symbo side of the protocol, so you can watch a
-two-line session and an inbound call flow with no account and no network:
+Both can live on the same page — `dial()` still works between sessions — and
+both go through the same sign-in.
+
+## How it fits together
+
+![Your page holds your UI, the SDK and the Symbo frame; your server talks to the public API; Symbo's engine rings the contacts and reads the queue.](docs/images/architecture.svg)
+
+The SDK creates an iframe served from `app.symbo.ai` and talks to it over
+`postMessage`. The frame holds the rep's audio leg, the calling device and the
+realtime connection. Your page holds everything the rep sees and decides what
+happens next: you send **commands** (`session.start`, `session.saveOutcome`,
+`dial`, `answerIncoming`, `audio.set` …) and receive **events**
+(`session.leg.ringing`, `session.wrap`, `call.incoming`, `warning` …). The
+browser never talks to the carrier and never holds a Symbo credential.
+
+The SDK sets the iframe up with `allow="microphone; autoplay"`, the target
+origin pinned, and the mode on the frame URL. Those are the things that are
+easy to get wrong by hand and fail in ways that are hard to diagnose, which is
+most of why this package exists rather than a page of copy-paste
+`postMessage`.
+
+Everything on the **server** side — syncing contacts, creating sessions,
+editing the queue while it runs, reading every call back — goes through the
+Symbo public API with an org-admin token, and is walked through end to end in
+the **Embedded Dialer** guide in the Symbo API documentation. This README is
+the browser side.
+
+## The examples
+
+Three pages in [`example/`](example), each self-contained. `npm install &&
+npm run demo` serves them, pointed at your Symbo account; add
+`?appUrl=http://localhost:3000/example/stub` to run any of them against the
+offline stub, which plays the Symbo side of the protocol with no account and
+no network.
 
 ```
 ?appUrl=http://localhost:3000/example/stub    the offline stub
 ?appUrl=https://<your-environment>            any other Symbo environment
-?mode=widget|compact|hidden                   start in that mode
+?mode=widget|compact|hidden                   start in that mode (collections.html)
 ```
 
 `appUrl` is an **origin**, not a path — the SDK appends `/dial?embed=1&mode=…`.
 
-### A power-dial reference page
+### Dialer widget · `example/index.html`
 
-[`example/power-dial.html`](example/power-dial.html) is the smaller, plainer
-one: a single self-contained file that signs in by redirect, starts a dial
-session you built in Symbo by its id, and renders the queue as Queued / In
-progress / Attempted / Completed boards that contacts move through as the
-engine works. No build step and no server of your own — copy the file out, put
-`dist/symbo-dialer.min.js` beside it, and serve the folder.
+[**Open it live**](https://gosymbo.github.io/symbo-dialer-sdk/example/) — a
+list of cases with Call buttons, a box for dialling any number, and Symbo's
+dialer beside them. Everything after the click — ringing, notes, the outcome
+form — happens inside the frame. This is the whole of the widget integration,
+and the page that shipped with 0.1.x, unchanged.
 
-```
-http://localhost:3000/example/power-dial.html
-?appUrl=http://localhost:3000/example/stub    against the offline stub
-```
+### Power dialer · `example/collections.html`
 
-It picks up a session the rep already has running, so connecting mid-session
-lands you on a live board.
+The same pretend collections tool, rebuilt on the power dialer: a queue that
+lights up as lines ring and connect, a wrap-up panel, an inbound banner, an
+audio-device picker, a mode switch and a live log of everything the dialer
+sends back. It also keeps a one-off Call button per contact, to show the two
+coexisting.
+
+![The example page's queue in the middle of a two-line round: one contact connected, the other line hung up because the first answered, the rest waiting.](docs/images/example-queue-round.png)
+
+### Power dialer, minimal · `example/power-dial.html`
+
+The smaller, plainer one: a single file that signs in by redirect, starts a
+dial session you built in Symbo by its id, and renders the queue as Queued /
+In progress / Attempted / Completed boards that contacts move through as the
+engine works. No build step and no server of your own — copy the file out,
+put `dist/symbo-dialer.min.js` beside it, and serve the folder. It picks up a
+session the rep already has running, so connecting mid-session lands you on a
+live board.
+
+![The power-dial reference page mid-session: counts along the top, the session controls, four columns of contacts and the live bar for the connected call.](docs/images/power-dial-board.png)
 
 ## Three modes: widget, compact and hidden
 
-Reps still complete a handshake with Symbo before a call can be placed: sign
-in, the microphone permission, the calling device registering. How much of
-Symbo they see while doing it is your choice. All three run the same dialer
-and answer the same commands; they differ only in what the frame renders.
+`widget` is the dialer-widget integration; `compact` and `hidden` are the
+power-dialer integration. Reps still complete a handshake with Symbo before a
+call can be placed: sign in, the microphone permission, the calling device
+registering. How much of Symbo they see while doing it is what the mode
+decides. All three run the same dialer and answer the same commands; they
+differ only in what the frame renders.
+
+![Widget shows Symbo's whole dialer in the frame; compact shows a status strip with your UI around it; hidden renders nothing and sends every state change as an event.](docs/images/modes.svg)
 
 | | `mode: 'widget'` (default) | `mode: 'compact'` | `mode: 'hidden'` |
 | --- | --- | --- | --- |
@@ -136,11 +218,13 @@ with a deprecation warning; `hidden: false` keeps its old meaning of
 
 `mount()` resolves once a user is signed in inside the frame. Until then Symbo
 says `auth.required`, and the mount timer stops — a rep taking their time is
-not a timeout. There are two ways through.
+not a timeout. There are two ways through, and you can offer both.
 
-**A Symbo login tab.** `auth.required` carries a `loginUrl`. Widget mode shows
-Symbo's login form in the frame and compact mode a **Sign in** button that
-opens the tab; in hidden mode, or if you want your own button, call
+![Two ways in: a Symbo login tab opened from a click, or a silent sign-in where your server signs a JWT that Symbo verifies against the JWKS you publish.](docs/images/sign-in-paths.svg)
+
+**A · A Symbo login tab.** `auth.required` carries a `loginUrl`. Widget mode
+shows Symbo's login form in the frame and compact mode a **Sign in** button
+that opens the tab; in hidden mode, or if you want your own button, call
 `openSignIn()` **from a click handler** (browsers block tabs opened any other
 way). When the rep finishes, the frame picks the session up by itself and
 `ready` follows.
@@ -160,10 +244,12 @@ dialer.on('ready', () => {
 dialer.mount()
 ```
 
-**Silently, with a trusted auth token.** Your server signs a short-lived RS256
-JWT for the rep who is logged into *your* app, and the page hands it over. The
+**B · Silently, with a trusted auth token.** Your server signs a short-lived
+RS256 JWT for the rep who is logged into *your* app, and the page hands it
+over. Symbo verifies the signature against a public key you publish as a JWKS,
+so Symbo issues you no credential at all — the only key involved is yours. The
 token carries an `organization_id` claim naming the Symbo organization it is
-for — one `profileId` can serve several, and the claim picks which:
+for; one `profileId` can serve several, and the claim picks which:
 
 ```js
 const PROFILE_ID = 'trusted-token-profile-live-…' // Symbo gives you this
@@ -175,17 +261,22 @@ dialer.on('auth.required', async () => {
   try {
     await dialer.signIn({ token, profileId: PROFILE_ID }) // { user }; `ready` follows
   } catch (err) {
-    // TOKEN_REJECTED       — Stytch would not accept the JWT
-    // USER_NOT_PROVISIONED — Symbo has no rep with that email
+    // TOKEN_REJECTED           — Symbo would not accept the JWT (signature, iss, aud, exp, kid)
+    // USER_NOT_PROVISIONED     — Symbo has no rep with that email
     // USER_NEEDS_FIRST_LOGIN   — the rep has not accepted their Symbo invite
     // ORGANIZATION_ID_REQUIRED — the token has no organization_id claim
     // ORGANIZATION_MISMATCH    — that rep is not in the org the token names
+    // PROFILE_NOT_CONFIGURED   — the profileId is wrong, or not bound to that org
+    // CALLING_NOT_ENABLED      — the rep has no calling seat
   }
 })
 ```
 
 Sessions last 8 hours. `auth.required` fires again at expiry; mint another
-token and call `signIn()` again — the rep sees nothing.
+token and call `signIn()` again — the rep sees nothing. The one-time setup on
+your side (a keypair, a JWKS URL, the `iss` and `aud` you will use) and a
+troubleshooting table for first-run `TOKEN_REJECTED`s are in the
+**Embedded Dialer** guide, under *Setting up silent sign-in*.
 
 `signIn()` and `getState()` work before `ready`; every other command rejects
 with `NOT_READY` until then. If the session expires mid-day, `auth.required`
@@ -195,13 +286,91 @@ is sent again and `dialer.ready` goes back to `false`.
 at all — a wrong `appUrl`, an unreachable environment, a Symbo build without
 the embed surface — and rejects `mount()` with `MOUNT_TIMEOUT`.
 
-## Power-dial sessions
+## The dialer widget
 
-The engine that dials lives on Symbo's servers. It rings your organisation's
+Mount with no `mode` (or `mode: 'widget'`) and Symbo's dialer renders in your
+container, 420×485 unless you size the iframe. The rep signs in inside it,
+and every call — placed from your button or arriving inbound — is handled
+there: ringing, the contact card, notes, the outcome form. Your page needs
+`dial()` and, at most, the `call.*` events to know what state the line is in.
+
+The two things below are the widget integration. Both also work with the
+compact and hidden modes between power-dial sessions, which is where the
+notes about "no outcome form" apply.
+
+### One-off calls
+
+For a "Call" button on a single contact, outside a session:
+
+```js
+const { callId } = await dialer.dial({ prospectId: 'p-1001', phoneNumberId: 'pn-2' })
+// or, for a number you hold no Symbo record for:
+const { callId } = await dialer.dial({ number: '+12125550123', externalId: 'case-48211' })
+```
+
+`dial()` resolves when the carrier reports the call ringing, which is where
+the `callId` comes from. A `callId` of `null` is not a failed call: it comes
+back **fast** for a call that failed outright or was answered on another
+device, and after about 15 s for one that rings for a long time. Either way
+`call.started`, `call.ringing` and `call.ended` carry the id once it is known,
+so key your record off the events rather than off this resolution alone.
+
+Events: `call.started` → `call.ringing` → `call.answered` (far-end pickup) →
+`call.ended { reason, durationSeconds }` → `call.wrap`. That is the end of it:
+compact and hidden mode show no outcome form (widget mode shows Symbo's own),
+and there is no command for saving a one-off outcome (`session.saveOutcome`
+is for the call in front of the rep in a session, and refuses with
+`NO_ACTIVE_SESSION` outside one). Render your own wrap-up on `call.wrap` and
+save it from your server with `PUT /calls/{id}`; the completion signal is that
+response — not an event in the page. `contact.matched` fires when Symbo
+recognises a number you dialled without a prospect. `dial()` is refused with
+`SESSION_ACTIVE` while a session runs: the rep's line is busy for the whole
+session.
+
+`externalId` comes back on the call events and on the call record, which is
+how a call lands against your record without a prospect. Prefer `prospectId`
+when you have one.
+
+### Inbound calls
+
+In compact and hidden mode the frame plays **no** ringtone — widget mode rings
+by itself. Play your own on `call.incoming`, and stop it when the call is
+answered, ignored, or ends:
+
+![The example page's inbound banner: who is calling, the number and matched contact, an Answer button and an Ignore button.](docs/images/example-inbound.png)
+
+```js
+dialer.on('call.incoming', ({ callId, from, prospectId, prospectName }) => {
+  ringtone.play()
+  showBanner(prospectName || from, {
+    answer: () => dialer.answerIncoming(), // → { callId }; then call.answered …
+    ignore: () => dialer.ignoreIncoming(),
+  })
+})
+dialer.on('call.ended', ({ callId }) => {
+  if (callId === ringingCallId) ringtone.pause()
+})
+```
+
+An answered inbound call ends the way a one-off call does — `call.ended` →
+`call.wrap`, and the outcome is yours to save with `PUT /calls/{id}`.
+
+An inbound call that arrives while a session is active, or while a call is
+up, is not offered to the page: it follows the rep's normal no-answer routing
+(voicemail, forwarding). One inbound call rings at a time.
+
+## The power dialer
+
+Mount with `mode: 'compact'` or `'hidden'`, and draw the rest yourself. The
+engine that dials lives on Symbo's servers. It rings your organisation's
 number of lines at once (1–4, fixed per org; `dialer.concurrentCalls` tells
 you), bridges the rep to the first answer, hangs up the rest, and pauses until
-you say otherwise. You own the queue, the order, which of a contact's numbers
-is dialled, the outcome UI and what happens after each call.
+you say otherwise. The session is a Symbo dial session like any other — it
+sits on the rep's queue in Symbo, the rep or an admin can act on it from the
+app, and your page sees those actions as events. Through the API and the SDK
+you decide what goes on the queue and in what order, which of a contact's
+numbers is dialled, which outcome each conversation gets, and what happens
+after each call; your page draws the queue and the wrap-up.
 
 ### 1. Your server creates the session
 
@@ -218,12 +387,17 @@ POST /v1/dialSessions
     { "prospect_id": "p-1001", "phone_number_id": "pn-1" },
     { "prospect_id": "p-1002" }
   ],
-  "max_attempts": 2
+  "use_auto_timezone": false,
+  "skip_duplicates": true
 }
 ```
 
 The response carries the session id and its `queued_calls`. Hand the id to
-your page.
+your page. The number of lines, the retry rules and the default outcomes for
+unanswered lines are not per-session settings: they come from the
+organisation and the owner's power-dial settings. The full request and
+response, the filters, and what each rejection reason means are in the
+**Embedded Dialer** guide.
 
 ### 2. The page starts it
 
@@ -238,7 +412,9 @@ engine dials. From here on you render events.
 
 ### 3. What a round of dialing looks like
 
-With two lines:
+![One round with two lines: Symbo rings both, line 2 answers, line 1 is hung up, the engine pauses, the conversation ends with session.wrap, your page saves the outcome, the next round rings.](docs/images/round-sequence.svg)
+
+The same round, as the events arrive:
 
 ```
 session.started { dialSessionId, concurrentCalls: 2 }
@@ -275,101 +451,73 @@ When the queue runs out you get `session.noMoreCalls` and then `session.ended
 Every `session.leg.*` payload names the queued call (`queuedCallId`), the
 prospect (`prospectId`, `prospectName`), the number, the `from` number and —
 once a call exists — the `callId`. Key your rows on `queuedCallId`; join to
-your records on `prospectId`; join to Symbo's call webhooks on `callId`.
+your records on `prospectId`; join to the call records you read back from the
+API on `callId`.
 
-### 4. Pause, resume, skip, end
+### 4. The wrap-up
+
+`session.wrap` is your cue. The engine is paused, and with
+`outcomeRequired: true` it will not resume until the conversation has an
+outcome — so this panel is what keeps the session moving.
+
+![The example page's wrap-up panel: the contact, how long the call lasted, an outcome picker, a note, and three buttons — save and dial next, save and pause, save and finish.](docs/images/example-wrap-up.png)
+
+```js
+dialer.on('session.wrap', ({ callId, prospectId, durationSeconds, outcomeRequired }) => {
+  showWrapUp({ callId, prospectId, durationSeconds })
+})
+
+// From your Save button:
+const { outcomeId } = await dialer.session.saveOutcome({
+  callId,                      // defaults to the call waiting for its outcome
+  outcomeValue: 'MEETING_BOOKED', // or outcomeId, from GET /v1/callOutcomes
+  note: 'Demo booked for Friday 10:00.',
+  callFields: { c_meeting_at_4821: '2026-09-25T10:00:00-07:00' },
+  then: 'resume',              // 'resume' (next round), 'pause', or 'end'
+})
+```
+
+`call.completed` follows the save. You can save from your server instead
+(`PUT /calls/{id}`) and then call `dialer.session.resume()`; `saveOutcome` is
+the same write done from the page in one step.
+
+### 5. Pause, resume, skip, end
 
 | You call | What happens |
 | --- | --- |
 | `session.pause()` | Lines that are ringing are hung up (they get the cancelled default outcome). A connected call is **never** cut. The engine stays paused after the call until you resume |
 | `session.resume()` | Dials the next round. Refused with `OUTCOME_PENDING` while a call is waiting for its outcome, and with `CALL_IN_PROGRESS` while a contact is still on the line (hang up or `skipCurrent()` first) |
-| `session.saveOutcome({ …, then })` | Saves the outcome and note on the call, then `'resume'` (next round), `'pause'` (stay paused) or `'end'` |
+| `session.saveOutcome({ …, then })` | Saves the outcome, note and call fields on the call, then `'resume'` (next round), `'pause'` (stay paused) or `'end'` |
 | `session.skipCurrent()` | Hangs up the connected call and skips its outcome |
 | `hangUp()` | Hangs up the connected call (→ `session.wrap`), or cancels ringing lines |
-| `session.removeQueued(queuedCallId)` | Drops a queued contact from this session. Best-effort once it is dialing (`QUEUED_CALL_DIALING`) |
-| `session.end({ force })` | Ends the session. Refused with `CALL_IN_PROGRESS` over a connected call unless `force: true` |
+| `session.removeQueued(queuedCallId)` | Drops a queued contact from this session. Refused with `QUEUED_CALL_DIALING` once its line is ringing |
+| `session.end({ force })` | Ends the session. Refused with `CALL_IN_PROGRESS` over a connected call unless `force: true`; the call survives either way. Resolves with `{ counts }` |
 | `session.getQueue()` | `{ dialSessionId, counts, queue: [{ queuedCallId, prospectId, prospectName, number, status, order, attempts, lastCallId, lastOutcomeId }] }` |
 | `getState()` | Everything at once: `{ signedIn, deviceReady, mode, powerDialing, concurrentCalls, session, call, incoming, warnings }` |
 
-"Try again later" and other queue edits are made from your server
-(`PUT /v1/dialSessionQueuedCalls/:id` with `status`, `retry_at` and
-`retry_position: 'top' | 'bottom'`); the frame learns of them and sends
-`session.queue.updated`.
-
 Things the engine decides on its own, and that you should expect: it retries
-per the session's `max_attempts` / `retry_on`; it skips contacts outside the
-session's timezone and phone-type filters; unanswered and cancelled legs get
-the rep's default outcomes; a session can also be driven from inside Symbo by
-the rep or an admin, in which case you see the same events (and
-`session.admin`).
+an unanswered contact on the owner's own power-dial schedule, and rotates
+through the contact's numbers unless you pinned one; it skips contacts outside
+the session's timezone and phone-type filters without an event; unanswered and
+cancelled legs get the rep's default outcomes; a session can also be driven
+from inside Symbo by the rep or an admin, in which case you see the same
+events (and `session.admin`).
 
-### Counts
+### 6. The queue while it runs
 
-`counts` on `session.queue.updated`, `session.ended` and `getState()`:
+Apart from `session.removeQueued()`, every change to the queue is made from
+your server, on the queued call's id: `PUT /v1/dialSessionQueuedCalls/{id}`
+with `status`, `retry_at`, `retry_position: 'top' | 'bottom'` or
+`phone_number_id`. The engine reads the queue before every round, and the
+frame sends `session.queue.updated { counts }` as its counts change.
+
+![The states of a queued contact: queued, dialing, then attempted, completed or cancelled; removed and re-queued through the API; attempted contacts come back to the queue on retry.](docs/images/queued-call-states.svg)
+
+`counts` on `session.queue.updated`, `session.ended` and `getState()` is
 `{ queued, dialing, attempted, completed, cancelled, removed, remaining }`.
-
-These count queue rows. For how many of the session's *calls* carry an outcome,
-read `counts.outcomes_saved` on `GET /v1/dialSessions/{id}` — it is not on these
-events, because a session can hold several calls per row.
-
-## One-off calls
-
-For a "Call" button on a single contact, outside a session:
-
-```js
-const { callId } = await dialer.dial({ prospectId: 'p-1001', phoneNumberId: 'pn-2' })
-// or, for a number you hold no Symbo record for:
-const { callId } = await dialer.dial({ number: '+12125550123', externalId: 'case-48211' })
-```
-
-`dial()` resolves when the carrier reports the call ringing, which is where
-the `callId` comes from. A `callId` of `null` is not a failed call: it comes
-back **fast** for a call that failed outright or was answered on another
-device, and after about 15 s for one that rings for a long time. Either way
-`call.started`, `call.ringing` and `call.ended` carry the id once it is known,
-so key your record off the events rather than off this resolution alone.
-
-Events: `call.started` → `call.ringing` → `call.answered` (far-end pickup) →
-`call.ended { reason, durationSeconds }` → `call.wrap`. That is the end of it:
-compact and hidden mode show no outcome form (widget mode shows Symbo's own),
-and there is no command for saving a one-off outcome (`session.saveOutcome` is for the call in front of the rep in a
-session, and refuses with `NO_ACTIVE_SESSION` outside one). Render your own
-wrap-up on `call.wrap` and save it from your server with `PUT /calls/:id`; the
-completion signal is that response, or Symbo's `call.updated` / `call.completed`
-webhooks — not an event in the page. `contact.matched` fires when Symbo
-recognises a number you dialled without a prospect. `dial()` is refused with
-`SESSION_ACTIVE` while a session runs: the rep's line is busy for the whole
-session.
-
-`externalId` comes back on the call events and on the `call.*` webhooks, which
-is how a call lands against your record without a prospect. Prefer
-`prospectId` when you have one.
-
-## Inbound calls
-
-In compact and hidden mode the frame plays **no** ringtone — widget mode rings
-by itself. Play your own on `call.incoming`, and stop it when the call is
-answered, ignored, or ends:
-
-```js
-dialer.on('call.incoming', ({ callId, from, prospectId, prospectName }) => {
-  ringtone.play()
-  showBanner(prospectName || from, {
-    answer: () => dialer.answerIncoming(), // → { callId }; then call.answered …
-    ignore: () => dialer.ignoreIncoming(),
-  })
-})
-dialer.on('call.ended', ({ callId }) => {
-  if (callId === ringingCallId) ringtone.pause()
-})
-```
-
-An answered inbound call ends the way a one-off call does — `call.ended` →
-`call.wrap`, and the outcome is yours to save with `PUT /calls/:id`.
-
-An inbound call that arrives while a session is active, or while a call is
-up, is not offered to the page: it follows the rep's normal no-answer routing
-(voicemail, forwarding). One inbound call rings at a time.
+These count queue rows. For how many of the session's *calls* carry an
+outcome, read `counts.outcomes_saved` on `GET /v1/dialSessions/{id}` — it is
+not on these events, because a session can hold several calls per row.
 
 ## Audio devices
 
@@ -389,7 +537,8 @@ reloads.
 
 Anything Symbo's own UI would show as a problem arrives as a `warning`
 with a code, and is withdrawn with `warning.cleared`. `dialer.warnings` is a
-`Map` of the ones currently raised.
+`Map` of the ones currently raised. In hidden mode these events are the only
+way the rep learns about a problem, so show them.
 
 | Code | Meaning |
 | --- | --- |
@@ -493,8 +642,9 @@ receives everything.
 | `error` | `{ code, message }` — a refusal that was not an answer to a command |
 
 Events are good for driving your UI in the moment. For anything you need to
-keep, take it from Symbo's webhooks (`call.created`, `call.completed`,
-`call.updated`) — events in a page are not durable.
+keep, read the call records back from the API — `GET /calls?dialSessionId=…`
+returns every leg of a session with its outcome — because events in a page
+are not durable.
 
 ## Error codes
 
@@ -515,15 +665,15 @@ A refused command rejects with a `SymboDialerError` carrying one of these on
 | `POSTCALL_DETAILS_REQUIRED` | The last one-off call still needs an outcome |
 | `NO_INCOMING_CALL` | Nothing is ringing |
 | `AUDIO_DEVICE_NOT_FOUND` | Unknown device id |
-| `TOKEN_REQUIRED` / `TOKEN_REJECTED` | `signIn()` was given no token / Stytch would not accept the one it got |
+| `TOKEN_REQUIRED` / `TOKEN_REJECTED` | `signIn()` was given no token / Symbo would not accept the one it got |
 | `PROFILE_NOT_CONFIGURED` | The `profileId` is wrong, or not bound to the organization the token names |
 | `ORGANIZATION_ID_REQUIRED` / `ORGANIZATION_MISMATCH` | The token carries no `organization_id` claim / names an organization the rep is not in |
 | `USER_NOT_PROVISIONED` / `USER_NEEDS_FIRST_LOGIN` | Symbo has no such rep / the rep has not accepted their invite |
 | `REALTIME_DISCONNECTED` | The frame's realtime connection is down; try again shortly |
-| `SESSION_NOT_FOUND` / `SESSION_NOT_STARTABLE` / `SESSION_ALREADY_ACTIVE` | `session.start` problems |
+| `SESSION_NOT_FOUND` / `SESSION_NOT_STARTABLE` / `SESSION_ALREADY_ACTIVE` | `session.start` problems: not visible to this rep, ended or on another rep's queue, or a session is already loaded |
 | `NO_ACTIVE_SESSION` | A `session.*` command with no session running |
 | `OUTCOME_PENDING` | `session.resume` before the last call's outcome was saved |
-| `NO_CALL_TO_SAVE` / `OUTCOME_UNKNOWN` / `NOTE_REQUIRED` | `session.saveOutcome` problems |
+| `NO_CALL_TO_SAVE` / `OUTCOME_UNKNOWN` / `NOTE_REQUIRED` | `session.saveOutcome` problems: nothing waiting for an outcome, an unknown outcome, or an outcome that requires a note and got none |
 | `QUEUED_CALL_NOT_FOUND` / `QUEUED_CALL_DIALING` | `session.removeQueued` problems |
 | `UNKNOWN_COMMAND` | The Symbo release in front of you does not know this command yet |
 
@@ -586,9 +736,10 @@ move; pin an exact version if that matters to you.
 
 ```bash
 npm install
-npm test        # protocol contract, client behaviour, and the stub driven end to end
-npm run build   # dist/symbo-dialer.min.js, the script-tag bundle
-npm run demo    # serve the example
+npm test          # protocol contract, client behaviour, and the stub driven end to end
+npm run build     # dist/symbo-dialer.min.js, the script-tag bundle
+npm run demo      # serve the example
+npm run diagrams  # redraw docs/images/*.svg from docs/diagrams/build.mjs
 ```
 
 The npm package ships plain ESM from `src/`. There is no build step for the
@@ -598,6 +749,11 @@ automatically on publish.
 The message names are declared twice, here and in the Symbo application, and
 `test/protocol.test.js` pins them on this side against a literal shared with
 the application's own contract test. Change one, change both.
+
+The figures in `docs/images/` are shared with the Symbo API's **Embedded
+Dialer** guide, which links to them by URL. The SVGs are generated by
+`docs/diagrams/build.mjs`; the PNGs are screenshots of the example pages
+running against the offline stub.
 
 ## Licence
 

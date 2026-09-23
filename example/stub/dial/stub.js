@@ -523,7 +523,7 @@
       if (!profileId) {
         return refuse(msg, 'PROFILE_NOT_CONFIGURED', 'A profileId is required.')
       }
-      // The stub does no crypto: 'expired' stands in for anything Stytch would
+      // The stub does no crypto: 'expired' stands in for anything Symbo would
       // refuse, and any other non-empty token is accepted.
       if (token === 'expired') {
         return refuse(msg, 'TOKEN_REJECTED', 'This sign-in token was not accepted.')

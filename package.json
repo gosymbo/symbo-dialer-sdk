@@ -38,6 +38,7 @@
     "demo": "npm run serve",
     "serve": "npx --yes http-server -p 3000 -c-1 -o /example/",
     "test": "vitest run",
+    "diagrams": "node docs/diagrams/build.mjs",
     "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {

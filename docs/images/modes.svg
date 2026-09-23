@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 360" width="1020" height="360" role="img" aria-label="The three modes: widget shows Symbo’s whole dialer in the frame, compact shows a status strip with your UI around it, hidden renders nothing and sends every state change as an event.">
+<title>The three modes: widget shows Symbo’s whole dialer in the frame, compact shows a status strip with your UI around it, hidden renders nothing and sends every state change as an event.</title>
+<defs><marker id="arrow-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#14161c"/></marker><marker id="arrow-you" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f4fd8"/></marker><marker id="arrow-symbo" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b5bd6"/></marker><marker id="arrow-world" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/></marker><marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6479"/></marker><marker id="arrow-faint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b93a7"/></marker></defs>
+<rect width="1020" height="360" fill="#ffffff"/>
+<rect x="20" y="20" width="320" height="320" rx="10" fill="#ffffff" stroke="#c9ced8" stroke-width="1.25"/>
+<text x="36" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#14161c">mode: 'widget'</text>
+<text x="36" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#5b6479">the default · 420 × 485 unless you size it</text>
+<rect x="36" y="76" width="288" height="168" rx="8" fill="#eef2ff" stroke="#1f4fd8" stroke-width="1.25" stroke-dasharray="5 4"/>
+<text x="46" y="92" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#1f4fd8">YOUR PAGE</text>
+<rect x="121" y="102" width="118" height="132" rx="6" fill="#f1f0fb" stroke="#5b5bd6" stroke-width="1.25"/>
+<text x="180" y="122" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" text-anchor="middle" fill="#5b5bd6">Symbo’s dialer</text>
+<text x="180" y="137" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" text-anchor="middle" fill="#5b6479">keypad</text>
+<text x="180" y="152" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" text-anchor="middle" fill="#5b6479">contact card</text>
+<text x="180" y="167" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" text-anchor="middle" fill="#5b6479">notes</text>
+<text x="180" y="182" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" text-anchor="middle" fill="#5b6479">outcome form</text>
+<text x="180" y="197" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" text-anchor="middle" fill="#5b6479">settings</text>
+<text x="36" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#1f4fd8">Yours to build</text>
+<text x="36" y="284" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">a Call button</text>
+<text x="36" y="298" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">nothing else</text>
+<text x="190" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#5b5bd6">In the frame</text>
+<text x="190" y="284" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">sign-in form</text>
+<text x="190" y="298" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">keypad, contact card</text>
+<text x="190" y="312" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">notes, outcome form</text>
+<text x="190" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">ringtone, toasts</text>
+<rect x="350" y="20" width="320" height="320" rx="10" fill="#ffffff" stroke="#c9ced8" stroke-width="1.25"/>
+<text x="366" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#14161c">mode: 'compact'</text>
+<text x="366" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#5b6479">a status strip · 360 × 56, sized by the frame</text>
+<rect x="366" y="76" width="288" height="168" rx="8" fill="#eef2ff" stroke="#1f4fd8" stroke-width="1.25" stroke-dasharray="5 4"/>
+<text x="376" y="92" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#1f4fd8">YOUR PAGE</text>
+<rect x="388" y="112" width="244" height="34" rx="6" fill="#f1f0fb" stroke="#5b5bd6" stroke-width="1.25"/>
+<circle cx="404" cy="129" r="4" fill="#1a7f52"/>
+<text x="414" y="133" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="650" fill="#5b5bd6">Sam Rep · device ready</text>
+<text x="618" y="133" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" text-anchor="end" fill="#5b5bd6">⚙</text>
+<rect x="388" y="160" width="244" height="68" rx="6" fill="#ffffff" stroke="#1f4fd8" stroke-width="1.25"/>
+<text x="510" y="180" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your queue</text>
+<text x="510" y="195" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your wrap-up form</text>
+<text x="510" y="210" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your inbound banner</text>
+<text x="366" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#1f4fd8">Yours to build</text>
+<text x="366" y="284" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">queue, contact card</text>
+<text x="366" y="298" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">wrap-up form, keypad</text>
+<text x="366" y="312" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">inbound ringtone</text>
+<text x="366" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">show warnings</text>
+<text x="520" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#5b5bd6">In the frame</text>
+<text x="520" y="284" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">signed-in user</text>
+<text x="520" y="298" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">device state, Sign in</text>
+<text x="520" y="312" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">audio and caller-id</text>
+<text x="520" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">ringback, connect tone</text>
+<rect x="680" y="20" width="320" height="320" rx="10" fill="#ffffff" stroke="#c9ced8" stroke-width="1.25"/>
+<text x="696" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#14161c">mode: 'hidden'</text>
+<text x="696" y="64" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#5b6479">0 × 0 · nothing to see or focus</text>
+<rect x="696" y="76" width="288" height="168" rx="8" fill="#eef2ff" stroke="#1f4fd8" stroke-width="1.25" stroke-dasharray="5 4"/>
+<text x="706" y="92" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#1f4fd8">YOUR PAGE</text>
+<rect x="718" y="106" width="244" height="122" rx="6" fill="#ffffff" stroke="#1f4fd8" stroke-width="1.25"/>
+<text x="840" y="142" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your queue</text>
+<text x="840" y="157" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your wrap-up form</text>
+<text x="840" y="172" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your inbound banner</text>
+<text x="840" y="187" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" text-anchor="middle" fill="#1f4fd8">your status line and warnings</text>
+<rect x="948" y="210" width="6" height="6" rx="1" fill="#f1f0fb" stroke="#5b5bd6" stroke-width="1"/>
+<text x="942" y="215" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="9.5" text-anchor="end" fill="#5b5bd6">0 × 0 frame</text>
+<text x="696" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#1f4fd8">Yours to build</text>
+<text x="696" y="284" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">everything on screen</text>
+<text x="696" y="298" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">sign-in button, or</text>
+<text x="696" y="312" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">a silent token</text>
+<text x="696" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">show every warning</text>
+<text x="850" y="268" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#5b5bd6">In the frame</text>
+<text x="850" y="284" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">audio leg, device</text>
+<text x="850" y="298" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">realtime connection</text>
+<text x="850" y="312" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">ringback, connect tone</text>
+<text x="850" y="326" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#14161c">state as events only</text>
+</svg>

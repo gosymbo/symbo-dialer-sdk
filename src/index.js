@@ -796,7 +796,7 @@ class SymboDialerClient {
    * YOUR app — mint it for the current session's user, never for a user id
    * read from the request body. It must carry an `organization_id` claim
    * naming the Symbo organization the rep belongs to; one profile can serve
-   * several, and the claim says which. `profileId` is the Stytch trusted auth
+   * several, and the claim says which. `profileId` is the trusted auth
    * profile Symbo issued you at onboarding; it is not a secret.
    *
    * Resolves with `{ user }`; a `ready` event follows. Works before mount()
