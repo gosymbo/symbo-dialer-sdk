@@ -1,43 +1,229 @@
 // -----------------------------------------------------------------------------
 // @symbo/dialer-embed — mounts the Symbo dialer inside a partner application.
 //
-// Everything this does is available over raw postMessage; the package exists so
-// the protocol stays ours to change. A partner that hand-rolls the message
-// plumbing pins us to today's message names forever.
-//
-// Standalone by design: this file imports nothing from the Symbo application,
-// which is why it lives in its own repository.
-//
-// The price of that independence is that the message names below are declared
-// twice — here, and in the application's own embed/protocol.js. They must agree
-// exactly. Drift between them is the worst failure this package has, because it
-// is silent: both sides keep working while a partner quietly stops receiving an
-// event nobody noticed was renamed.
-//
-// test/protocol.test.js pins the contract on this side; symbo-ui has a matching
-// test on the other. Both assert against the same literal, so changing one side
-// fails that side's build until the other is changed to match.
+// Standalone: this file imports nothing from the Symbo application. The
+// message names below must match the Symbo app's embed protocol exactly;
+// test/protocol.test.js pins them.
 // -----------------------------------------------------------------------------
 
+// Bumped when a message is removed or renamed, or a payload field changes
+// meaning. Everything added for sessions, inbound calls, audio devices and
+// warnings is additive, so it stays at 2.
 export const PROTOCOL_VERSION = 2
 
 const DEFAULT_APP_URL = 'https://app.symbo.ai'
 
-export const COMMANDS = {
+// How the frame renders. `widget` is Symbo's own dialer, the same one the CRM
+// plugins embed; `compact` is a small status strip (sign-in, device state,
+// audio settings) that the iframe is sized to; `hidden` renders nothing at all
+// and the same state reaches the page as events and commands. Every mode runs
+// the same dialer underneath and answers the same commands.
+export const MODES = Object.freeze({
+  WIDGET: 'widget',
+  COMPACT: 'compact',
+  HIDDEN: 'hidden',
+})
+
+// What to size the frame to before it has told us anything. The frame's own
+// `resize` events take over from here in compact mode; in widget mode it sends
+// none, so this size stands unless the page styles the iframe itself.
+const DEFAULT_SIZE = Object.freeze({
+  [MODES.WIDGET]: Object.freeze({ width: 420, height: 485 }),
+  [MODES.COMPACT]: Object.freeze({ width: 360, height: 56 }),
+})
+
+export const COMMANDS = Object.freeze({
   HELLO: 'symbo:hello',
   DIAL: 'symbo:dial',
   HANG_UP: 'symbo:hangUp',
   SET_CONTACT: 'symbo:setContact',
-}
+  GET_STATE: 'symbo:getState',
+  SIGN_IN: 'symbo:signIn',
+  SIGN_OUT: 'symbo:signOut',
+  RELOAD: 'symbo:reload',
+  ANSWER_INCOMING: 'symbo:answerIncoming',
+  IGNORE_INCOMING: 'symbo:ignoreIncoming',
+  LIST_AUDIO_DEVICES: 'symbo:listAudioDevices',
+  SET_AUDIO_DEVICES: 'symbo:setAudioDevices',
+  SESSION_START: 'symbo:session.start',
+  SESSION_PAUSE: 'symbo:session.pause',
+  SESSION_RESUME: 'symbo:session.resume',
+  SESSION_END: 'symbo:session.end',
+  SESSION_SKIP_CURRENT: 'symbo:session.skipCurrent',
+  SESSION_REMOVE_QUEUED: 'symbo:session.removeQueued',
+  SESSION_GET_QUEUE: 'symbo:session.getQueue',
+  SESSION_SAVE_OUTCOME: 'symbo:session.saveOutcome',
+  SESSION_SET_CONCURRENT_CALLS: 'symbo:session.setConcurrentCalls',
+})
 
 // Symbo's answer to a command. Not a public event — it settles the promise the
 // command returned and is never delivered to an on() handler. Exported so the
 // contract test can pin it alongside the commands and events.
 export const RESULT = 'symbo:result'
 
-// How long to wait for that answer before giving up. Only reachable if Symbo
+export const EVENTS = Object.freeze({
+  READY: 'symbo:ready',
+  AUTH_REQUIRED: 'symbo:auth.required',
+  DEVICE_READY: 'symbo:device.ready',
+  DEVICE_ERROR: 'symbo:device.error',
+  PERMISSION_DENIED: 'symbo:permission.denied',
+  WARNING: 'symbo:warning',
+  WARNING_CLEARED: 'symbo:warning.cleared',
+  CALL_STARTED: 'symbo:call.started',
+  CALL_RINGING: 'symbo:call.ringing',
+  CALL_INCOMING: 'symbo:call.incoming',
+  CALL_ANSWERED: 'symbo:call.answered',
+  CALL_ENDED: 'symbo:call.ended',
+  CALL_POST_CALL: 'symbo:call.postCall',
+  CALL_COMPLETED: 'symbo:call.completed',
+  CONTACT_MATCHED: 'symbo:contact.matched',
+  AUDIO_DEVICES_CHANGED: 'symbo:audio.devicesChanged',
+  SESSION_STARTED: 'symbo:session.started',
+  SESSION_PAUSED: 'symbo:session.paused',
+  SESSION_RESUMED: 'symbo:session.resumed',
+  SESSION_ENDED: 'symbo:session.ended',
+  SESSION_NO_MORE_CALLS: 'symbo:session.noMoreCalls',
+  SESSION_LEG_RINGING: 'symbo:session.leg.ringing',
+  SESSION_LEG_ANSWERED: 'symbo:session.leg.answered',
+  SESSION_LEG_CONNECTED: 'symbo:session.leg.connected',
+  SESSION_LEG_ENDED: 'symbo:session.leg.ended',
+  SESSION_POST_CALL: 'symbo:session.postCall',
+  SESSION_QUEUE_UPDATED: 'symbo:session.queue.updated',
+  SESSION_ADMIN: 'symbo:session.admin',
+  SESSION_CONCURRENT_CALLS_CHANGED: 'symbo:session.concurrentCallsChanged',
+  UPDATE_AVAILABLE: 'symbo:update.available',
+  RESIZE: 'symbo:resize',
+  ERROR: 'symbo:error',
+})
+
+// Codes Symbo answers with. A refused command rejects with one of these on
+// `err.code`; the `error` event carries one for refusals that were not an
+// answer to anything.
+export const ERRORS = Object.freeze({
+  NOT_SIGNED_IN: 'NOT_SIGNED_IN',
+  CALLING_NOT_ENABLED: 'CALLING_NOT_ENABLED',
+  INVALID_NUMBER: 'INVALID_NUMBER',
+  CALL_IN_PROGRESS: 'CALL_IN_PROGRESS',
+  UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
+  POSTCALL_DETAILS_REQUIRED: 'POSTCALL_DETAILS_REQUIRED',
+  NEEDS_SETUP: 'NEEDS_SETUP',
+  EMBED_NOT_ENABLED: 'EMBED_NOT_ENABLED',
+  ORIGIN_NOT_ALLOWED: 'ORIGIN_NOT_ALLOWED',
+  HIJACK_MODE: 'HIJACK_MODE',
+  DEVICE_NOT_READY: 'DEVICE_NOT_READY',
+  MIC_PERMISSION_DENIED: 'MIC_PERMISSION_DENIED',
+  PROSPECT_NOT_FOUND: 'PROSPECT_NOT_FOUND',
+  NO_ACTIVE_CALL: 'NO_ACTIVE_CALL',
+  NO_INCOMING_CALL: 'NO_INCOMING_CALL',
+  SESSION_ACTIVE: 'SESSION_ACTIVE',
+  AUDIO_DEVICE_NOT_FOUND: 'AUDIO_DEVICE_NOT_FOUND',
+  TOKEN_REJECTED: 'TOKEN_REJECTED',
+  TOKEN_REQUIRED: 'TOKEN_REQUIRED',
+  PROFILE_NOT_CONFIGURED: 'PROFILE_NOT_CONFIGURED',
+  ORGANIZATION_ID_REQUIRED: 'ORGANIZATION_ID_REQUIRED',
+  ORGANIZATION_MISMATCH: 'ORGANIZATION_MISMATCH',
+  USER_NOT_PROVISIONED: 'USER_NOT_PROVISIONED',
+  USER_NEEDS_FIRST_LOGIN: 'USER_NEEDS_FIRST_LOGIN',
+  // signIn refusals Symbo carries through from its own login rules.
+  EMBEDDED_DIALER_DISABLED: 'EMBEDDED_DIALER_DISABLED',
+  ACCOUNT_SETUP_INCOMPLETE: 'ACCOUNT_SETUP_INCOMPLETE',
+  OTP_REQUIRED: 'OTP_REQUIRED',
+  ACCOUNT_SUSPENDED: 'ACCOUNT_SUSPENDED',
+  ACCOUNT_INACTIVE: 'ACCOUNT_INACTIVE',
+  SUBSCRIPTION_REQUIRED: 'SUBSCRIPTION_REQUIRED',
+  RATE_LIMITED: 'RATE_LIMITED',
+  POWER_DIALING_NOT_ENABLED: 'POWER_DIALING_NOT_ENABLED',
+  REALTIME_DISCONNECTED: 'REALTIME_DISCONNECTED',
+  NO_ACTIVE_SESSION: 'NO_ACTIVE_SESSION',
+  SESSION_ALREADY_ACTIVE: 'SESSION_ALREADY_ACTIVE',
+  SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',
+  SESSION_NOT_STARTABLE: 'SESSION_NOT_STARTABLE',
+  OUTCOME_PENDING: 'OUTCOME_PENDING',
+  OUTCOME_UNKNOWN: 'OUTCOME_UNKNOWN',
+  NOTE_REQUIRED: 'NOTE_REQUIRED',
+  NO_CALL_TO_SAVE: 'NO_CALL_TO_SAVE',
+  QUEUED_CALL_NOT_FOUND: 'QUEUED_CALL_NOT_FOUND',
+  QUEUED_CALL_DIALING: 'QUEUED_CALL_DIALING',
+  CONCURRENT_CALLS_LOCKED: 'CONCURRENT_CALLS_LOCKED',
+  INVALID_CONCURRENT_CALLS: 'INVALID_CONCURRENT_CALLS',
+})
+
+// Codes the `warning` event carries. Each is cleared by a `warning.cleared`
+// with the same code; `dialer.warnings` holds the ones currently raised.
+export const WARNINGS = Object.freeze({
+  NOT_SIGNED_IN: 'NOT_SIGNED_IN',
+  REALTIME_DISCONNECTED: 'REALTIME_DISCONNECTED',
+  DEVICE_NOT_READY: 'DEVICE_NOT_READY',
+  DEVICE_ERROR: 'DEVICE_ERROR',
+  MIC_PERMISSION_DENIED: 'MIC_PERMISSION_DENIED',
+  EMBED_NOT_ENABLED: 'EMBED_NOT_ENABLED',
+  POWER_DIALING_NOT_ENABLED: 'POWER_DIALING_NOT_ENABLED',
+  HIJACK_MODE: 'HIJACK_MODE',
+})
+
+// Codes raised by this package itself, before anything reached Symbo. They
+// never travel over postMessage, which is why they are not in ERRORS.
+export const CLIENT_ERRORS = Object.freeze({
+  INVALID_OPTIONS: 'INVALID_OPTIONS',
+  NOT_MOUNTED: 'NOT_MOUNTED',
+  NOT_READY: 'NOT_READY',
+  DESTROYED: 'DESTROYED',
+  MOUNT_TIMEOUT: 'MOUNT_TIMEOUT',
+  COMMAND_TIMEOUT: 'COMMAND_TIMEOUT',
+  NO_LOGIN_URL: 'NO_LOGIN_URL',
+  POPUP_BLOCKED: 'POPUP_BLOCKED',
+  UNKNOWN: 'UNKNOWN',
+})
+
+// Commands Symbo answers before anyone is signed in. Everything else waits for
+// `ready`, because there is no user to act for until then.
+const PRE_READY_COMMANDS = new Set([
+  COMMANDS.SIGN_IN,
+  COMMANDS.SIGN_OUT,
+  COMMANDS.RELOAD,
+  COMMANDS.GET_STATE,
+])
+
+// The two codes Symbo answers the handshake with when it will not talk to this
+// page at all: the organisation does not have the embedded dialer, or this
+// origin is not on its list. They arrive as an `error` and a `warning` with no
+// requestId to answer, and nothing the page does will change them, so mount()
+// rejects with the code instead of waiting out its timer.
+const HANDSHAKE_REFUSALS = new Set([
+  ERRORS.EMBED_NOT_ENABLED,
+  ERRORS.ORIGIN_NOT_ALLOWED,
+])
+
+const SAVE_OUTCOME_THEN = new Set(['resume', 'pause', 'end'])
+
+// How many lines a session can ring at once.
+const MIN_CONCURRENT_CALLS = 1
+const MAX_CONCURRENT_CALLS = 4
+const isConcurrentCalls = (value) =>
+  Number.isInteger(value) &&
+  value >= MIN_CONCURRENT_CALLS &&
+  value <= MAX_CONCURRENT_CALLS
+const CONCURRENT_CALLS_RULE = `a whole number of lines from ${MIN_CONCURRENT_CALLS} to ${MAX_CONCURRENT_CALLS}`
+
+// How long to wait for an answer before giving up. Only reachable if Symbo
 // fails to reply at all; a refusal comes back fast.
-const COMMAND_TIMEOUT_MS = 15000
+const DEFAULT_COMMAND_TIMEOUT_MS = 15000
+
+// `dial` is the one command that cannot share that budget. The frame answers
+// it only once the Symbo call id arrives — the carrier reporting remote
+// ringing — or after its own 15 s wait for one, and that clock starts after
+// the message has crossed and, for a prospectId, after a prospect lookup. A
+// 15 s budget here therefore expires first on any slow-ringing call: the
+// promise rejects with COMMAND_TIMEOUT, the frame's answer arrives to a
+// pending entry that is already gone, and the partner has a live call with no
+// callId. Keep this above the frame's CALL_ID_TIMEOUT_MS (symbo-ui
+// EmbedBridge.js); the two move together.
+const DIAL_TIMEOUT_MS = 25000
+
+// How long mount() waits for the frame to say anything. Cleared the moment
+// Symbo answers, with `ready` or with `auth.required` — a user taking their
+// time over a sign-in is not a timeout.
+const DEFAULT_MOUNT_TIMEOUT_MS = 30000
 
 // How often to repeat the opening hello until Symbo answers.
 //
@@ -45,26 +231,18 @@ const COMMAND_TIMEOUT_MS = 15000
 // replies to it, and a hello that arrives before its listener is attached is
 // dropped with nothing to retry it. The iframe's `load` event is not a reliable
 // moment to speak — it fires when the document is done, which can beat the
-// application's own startup on a cold cache. So keep saying it until we are
-// heard, and stop the moment we are.
+// application's own startup on a cold cache, and a document that never settles
+// never fires it at all (see mount()). So keep saying it until we are heard,
+// and stop the moment we are. The frame reloads itself after an in-frame
+// sign-in, which fires `load` again and restarts the loop.
 const HELLO_RETRY_MS = 400
-
-export const EVENTS = {
-  READY: 'symbo:ready',
-  AUTH_REQUIRED: 'symbo:auth.required',
-  CALL_STARTED: 'symbo:call.started',
-  CALL_INCOMING: 'symbo:call.incoming',
-  CALL_ANSWERED: 'symbo:call.answered',
-  CALL_ENDED: 'symbo:call.ended',
-  CALL_COMPLETED: 'symbo:call.completed',
-  CONTACT_MATCHED: 'symbo:contact.matched',
-  RESIZE: 'symbo:resize',
-  ERROR: 'symbo:error',
-}
 
 // The public event names, minus the namespace: callers write
 // dialer.on('call.ended'), not dialer.on('symbo:call.ended').
 const publicName = (type) => type.replace(/^symbo:/, '')
+
+// Handlers registered under this name receive every event, as (name, payload).
+const WILDCARD = '*'
 
 export class SymboDialerError extends Error {
   constructor(code, message) {
@@ -74,88 +252,357 @@ export class SymboDialerError extends Error {
   }
 }
 
+const invalid = (message) =>
+  new SymboDialerError(CLIENT_ERRORS.INVALID_OPTIONS, message)
+
+const isElement = (value) =>
+  !!value && typeof value === 'object' && typeof value.appendChild === 'function'
+
+const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value)
+
+let warnedAboutHiddenOption = false
+
 class SymboDialerClient {
-  constructor({ container, appUrl, mountTimeoutMs }) {
+  constructor(options = {}) {
+    const {
+      container,
+      appUrl,
+      mode,
+      hidden,
+      mountTimeoutMs,
+      commandTimeoutMs,
+    } = options
+
+    if (!isElement(container)) {
+      throw invalid('container is required and must be a DOM element.')
+    }
+
     this.appUrl = (appUrl || DEFAULT_APP_URL).replace(/\/$/, '')
-    this.origin = new URL(this.appUrl).origin
+    try {
+      this.origin = new URL(this.appUrl).origin
+    } catch {
+      throw invalid(`appUrl must be an origin such as ${DEFAULT_APP_URL}.`)
+    }
+
+    this.mode = resolveMode(mode, hidden)
     this.container = container
-    this.mountTimeoutMs = mountTimeoutMs ?? 30000
+    this.mountTimeoutMs = mountTimeoutMs ?? DEFAULT_MOUNT_TIMEOUT_MS
+    this.commandTimeoutMs = commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
 
     this.iframe = null
     this.helloTimer = null
     this.listeners = new Map()
     this.pending = new Map()
     this.requestSeq = 0
+
+    // Lifecycle. `contacted` flips on the first message from the frame (ready
+    // or auth.required); `ready` on ready, and back off if the session later
+    // expires. `authPending` is true between an auth.required and the ready
+    // that answers it, which is what lets repeats of auth.required be dropped.
+    this.mountPromise = null
+    this.mountTimer = null
+    this.settleMount = null
+    this.contacted = false
     this.ready = false
+    this.authPending = false
     this.destroyed = false
+    this.awaitingContact = []
+
+    // What the frame has told us about itself. Filled from `ready`; the line
+    // count also follows the session events.
+    this.loginUrl = null
+    this.user = null
+    this.organization = null
+    this.capabilities = []
+    this.concurrentCalls = null
+    this.concurrentCallsLocked = false
+    this.updateAvailable = false
+    this.deviceReady = false
+    this.powerDialing = false
+    // Set when reload() was answered, so the load that follows is reported
+    // as asked for.
+    this.reloadRequested = false
+    this.warnings = new Map()
 
     this.handleMessage = this.handleMessage.bind(this)
+
+    this.session = {
+      start: (options = {}) => {
+        if (!options.dialSessionId) {
+          return Promise.reject(invalid('session.start needs a dialSessionId.'))
+        }
+        const payload = { dialSessionId: options.dialSessionId }
+        if (options.concurrentCalls !== undefined) {
+          if (!isConcurrentCalls(options.concurrentCalls)) {
+            return Promise.reject(
+              invalid(`session.start's concurrentCalls must be ${CONCURRENT_CALLS_RULE}.`)
+            )
+          }
+          payload.concurrentCalls = options.concurrentCalls
+        }
+        return this.send(COMMANDS.SESSION_START, payload).then((result) => {
+          if (isFiniteNumber(result?.concurrentCalls)) {
+            this.concurrentCalls = result.concurrentCalls
+          }
+          return result
+        })
+      },
+      pause: () => this.send(COMMANDS.SESSION_PAUSE),
+      resume: () => this.send(COMMANDS.SESSION_RESUME),
+      end: (options = {}) =>
+        this.send(COMMANDS.SESSION_END, { force: !!options.force }),
+      skipCurrent: () => this.send(COMMANDS.SESSION_SKIP_CURRENT),
+      removeQueued: (arg) => {
+        const queuedCallId =
+          arg && typeof arg === 'object' ? arg.queuedCallId : arg
+        if (!queuedCallId) {
+          return Promise.reject(
+            invalid('session.removeQueued needs a queuedCallId.')
+          )
+        }
+        return this.send(COMMANDS.SESSION_REMOVE_QUEUED, { queuedCallId })
+      },
+      getQueue: () => this.send(COMMANDS.SESSION_GET_QUEUE),
+      saveOutcome: (options = {}) => {
+        if (!SAVE_OUTCOME_THEN.has(options.then)) {
+          return Promise.reject(
+            invalid(
+              "session.saveOutcome needs `then`: 'resume', 'pause' or 'end'."
+            )
+          )
+        }
+        return this.send(COMMANDS.SESSION_SAVE_OUTCOME, options)
+      },
+      // Ring this many lines from the next round. Lines already ringing are
+      // neither hung up nor added to. session.concurrentCallsChanged is sent
+      // only when the number changes. Refused with CONCURRENT_CALLS_LOCKED
+      // when the organization locks a different number; check
+      // hasCapability('concurrentCalls') against an older Symbo release.
+      setConcurrentCalls: (arg) => {
+        const concurrentCalls =
+          arg && typeof arg === 'object' ? arg.concurrentCalls : arg
+        if (!isConcurrentCalls(concurrentCalls)) {
+          return Promise.reject(
+            invalid(`session.setConcurrentCalls needs ${CONCURRENT_CALLS_RULE}.`)
+          )
+        }
+        return this.send(COMMANDS.SESSION_SET_CONCURRENT_CALLS, {
+          concurrentCalls,
+        }).then((result) => {
+          if (isFiniteNumber(result?.concurrentCalls)) {
+            this.concurrentCalls = result.concurrentCalls
+          }
+          return result
+        })
+      },
+    }
+
+    this.audio = {
+      list: () => this.send(COMMANDS.LIST_AUDIO_DEVICES),
+      set: (options = {}) => {
+        if (!options.microphoneId && !options.speakerId) {
+          return Promise.reject(
+            invalid('audio.set needs a microphoneId, a speakerId, or both.')
+          )
+        }
+        return this.send(COMMANDS.SET_AUDIO_DEVICES, options)
+      },
+    }
   }
 
+  /* ----------------------------------------------------------------- mount */
+
+  /**
+   * Create the iframe and resolve once the dialer can place calls.
+   *
+   * Resolution waits on a signed-in dialer, so a first-time user has to sign
+   * in before this settles. The timeout only covers the frame never answering
+   * at all; once Symbo has said `auth.required` the promise waits as long as
+   * the sign-in takes.
+   *
+   * Calling it twice returns the same promise.
+   */
   mount() {
+    if (this.destroyed) {
+      return Promise.reject(destroyedError())
+    }
+    if (this.mountPromise) return this.mountPromise
+
     const iframe = document.createElement('iframe')
-    iframe.src = `${this.appUrl}/dial?embed=1`
+    iframe.src = `${this.appUrl}/dial?embed=1&mode=${this.mode}`
     iframe.title = 'Symbo dialer'
     // Without this the dialer cannot reach the microphone: a cross-origin
-    // frame only gets it when the embedding page delegates it.
-    iframe.allow = 'microphone'
+    // frame only gets it when the embedding page delegates it. Autoplay is
+    // for ringback and the connect tone, which play inside the frame.
+    iframe.allow = 'microphone; autoplay'
+    iframe.style.display = 'block'
     iframe.style.border = '0'
-    iframe.style.width = '420px'
-    iframe.style.height = '485px'
+
+    if (this.mode === MODES.HIDDEN) {
+      // Nothing to see, nothing to focus, nothing for a screen reader. Kept
+      // in the document (not display:none) so the frame keeps running.
+      iframe.style.width = '0'
+      iframe.style.height = '0'
+      iframe.style.position = 'absolute'
+      iframe.style.visibility = 'hidden'
+      iframe.style.overflow = 'hidden'
+      iframe.style.pointerEvents = 'none'
+      iframe.setAttribute('aria-hidden', 'true')
+      iframe.setAttribute('tabindex', '-1')
+    }
 
     this.iframe = iframe
+    if (DEFAULT_SIZE[this.mode]) this.applySize(DEFAULT_SIZE[this.mode])
+
+    this.mountPromise = new Promise((resolve, reject) => {
+      this.settleMount = { resolve, reject }
+      this.mountTimer = setTimeout(() => this.onMountTimeout(), this.mountTimeoutMs)
+    })
+
     window.addEventListener('message', this.handleMessage)
+    // `load` is the natural moment to (re)start asking: it fires when the
+    // frame's document is done, and again after an in-frame sign-in reloads
+    // it.
+    iframe.addEventListener('load', () => this.onFrameLoad())
     this.container.appendChild(iframe)
 
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.stopSayingHello()
-        // Usually a wrong appUrl, an unreachable environment, or a Symbo
-        // build without the embed surface. Name those, so nobody starts by
-        // debugging their own code.
-        reject(
-          new SymboDialerError(
-            'MOUNT_TIMEOUT',
-            `The dialer at ${this.appUrl} did not respond. Check the appUrl is reachable and that it supports embedding.`
-          )
-        )
-      }, this.mountTimeoutMs)
+    // But do not depend on it. A document that never settles never fires
+    // `load` at all — one runaway media error handler retrying a source it
+    // can never fetch is enough — and the handshake would then never start:
+    // no hello, no answer, and the partner left with MOUNT_TIMEOUT and
+    // nothing naming the cause. The frame is in the document now, so start
+    // now. It costs nothing: a hello posted before the frame is listening is
+    // dropped, the loop repeats every HELLO_RETRY_MS, and startSayingHello()
+    // clears its own timer before arming the next, so the `load` call above
+    // cannot leave a second one running.
+    this.startSayingHello({ immediate: false })
 
-      // `once` so a later re-ready (the user signs out and back in) doesn't
-      // try to resolve a settled promise.
-      this.once(publicName(EVENTS.READY), () => {
-        clearTimeout(timer)
-        this.stopSayingHello()
-        this.ready = true
-        resolve(this)
-      })
+    return this.mountPromise
+  }
 
-      // auth.required is also an answer: Symbo heard us and is waiting on a
-      // sign-in. Stop repeating, or we would keep asking through however long
-      // the user takes to log in.
-      this.once(publicName(EVENTS.AUTH_REQUIRED), () => this.stopSayingHello())
+  onMountTimeout() {
+    this.mountTimer = null
+    this.stopSayingHello()
+    // We have been saying hello since the frame entered the document, so
+    // this is the frame never answering, not a handshake that never started.
+    // Usually a wrong appUrl, an unreachable environment, or a Symbo build
+    // without the embed surface. Name those, so nobody starts by debugging
+    // their own code.
+    const err = new SymboDialerError(
+      CLIENT_ERRORS.MOUNT_TIMEOUT,
+      `The dialer at ${this.appUrl} did not respond. Check the appUrl is reachable and that it supports embedding.`
+    )
+    this.rejectMount(err)
+    this.flushAwaitingContact(err)
+  }
 
-      iframe.addEventListener('load', () => this.startSayingHello())
-    })
+  clearMountTimer() {
+    if (this.mountTimer) clearTimeout(this.mountTimer)
+    this.mountTimer = null
+  }
+
+  resolveMount() {
+    if (!this.settleMount) return
+    this.settleMount.resolve(this)
+    this.settleMount = null
+  }
+
+  rejectMount(err) {
+    if (!this.settleMount) return
+    this.settleMount.reject(err)
+    this.settleMount = null
+  }
+
+  applySize({ width, height } = {}) {
+    if (!this.iframe || this.mode === MODES.HIDDEN) return
+    if (isFiniteNumber(width) && width >= 0) this.iframe.style.width = `${width}px`
+    if (isFiniteNumber(height) && height >= 0) {
+      this.iframe.style.height = `${height}px`
+    }
   }
 
   /* ------------------------------------------------------------- handshake */
 
-  startSayingHello() {
+  startSayingHello({ immediate = true } = {}) {
     const hello = () =>
       this.iframe?.contentWindow?.postMessage(
-        { type: COMMANDS.HELLO, payload: {}, protocolVersion: PROTOCOL_VERSION },
+        {
+          type: COMMANDS.HELLO,
+          payload: { protocolVersion: PROTOCOL_VERSION },
+          protocolVersion: PROTOCOL_VERSION,
+        },
         this.origin
       )
 
-    hello()
+    // Arm the repeat before the first hello: a frame that answers on the
+    // spot would otherwise stop a timer that does not exist yet and leave
+    // the one created after it running.
     this.stopSayingHello()
     this.helloTimer = setInterval(hello, HELLO_RETRY_MS)
+    // Skipped only by the mount-time call. The frame is still on about:blank
+    // there, whose origin is the string "null", so a post to the origin we
+    // pinned is refused and the browser logs a warning the partner cannot
+    // silence. Dropping just the leading hello keeps the safety net — the
+    // interval still fires if `load` never does — without that noise in
+    // every partner's console.
+    if (immediate) hello()
   }
 
   stopSayingHello() {
     if (this.helloTimer) clearInterval(this.helloTimer)
     this.helloTimer = null
+  }
+
+  // Symbo has spoken. Whatever it said, the hello loop and the mount timer
+  // have done their job, and commands that were waiting for a frame to talk
+  // to can go. Called for every message the frame sends, so it has to stay
+  // cheap and repeatable; a second call is a no-op.
+  markContacted() {
+    this.stopSayingHello()
+    this.clearMountTimer()
+    this.contacted = true
+    if (this.awaitingContact.length) this.flushAwaitingContact()
+  }
+
+  onReady(payload) {
+    this.ready = true
+    this.authPending = false
+    this.loginUrl = null
+
+    this.user = payload.user ?? null
+    this.organization = payload.organization ?? null
+    this.capabilities = Array.isArray(payload.capabilities)
+      ? payload.capabilities.slice()
+      : []
+    this.concurrentCalls = isFiniteNumber(payload.concurrentCalls)
+      ? payload.concurrentCalls
+      : null
+    this.concurrentCallsLocked = payload.concurrentCallsLocked === true
+    this.updateAvailable = payload.updateAvailable === true
+    this.deviceReady = !!payload.deviceReady
+    this.powerDialing = !!payload.powerDialing
+
+    // Older frames size themselves on ready rather than through resize.
+    if (payload.sizeInfo) this.applySize(payload.sizeInfo)
+
+    this.resolveMount()
+  }
+
+  /**
+   * Returns false when this is a repeat that should not reach listeners.
+   *
+   * The frame answers every hello it hears with auth.required until a session
+   * exists, and it reloads itself after an in-frame sign-in, so a page can see
+   * several for one unauthenticated state. One is the truth; the rest are
+   * noise. A fresh auth.required after `ready` is not a repeat — the session
+   * expired — and goes through.
+   */
+  onAuthRequired(payload) {
+    const repeat = this.authPending && !this.ready
+    this.ready = false
+    this.authPending = true
+    if (payload.loginUrl) this.loginUrl = payload.loginUrl
+    return !repeat
   }
 
   /* ---------------------------------------------------------------- events */
@@ -168,9 +615,9 @@ class SymboDialerClient {
   }
 
   once(event, handler) {
-    const wrapped = (payload) => {
+    const wrapped = (...args) => {
       this.off(event, wrapped)
-      handler(payload)
+      handler(...args)
     }
     return this.on(event, wrapped)
   }
@@ -180,15 +627,19 @@ class SymboDialerClient {
   }
 
   emit(event, payload) {
-    this.listeners.get(event)?.forEach((handler) => {
+    const call = (handler, args) => {
       try {
-        handler(payload)
+        handler(...args)
       } catch (err) {
         // One partner's broken handler must not stop the others, or stop us
         // processing the next message.
         console.error(`[symbo] listener for "${event}" threw`, err)
       }
-    })
+    }
+    this.listeners.get(event)?.forEach((handler) => call(handler, [payload]))
+    this.listeners
+      .get(WILDCARD)
+      ?.forEach((handler) => call(handler, [event, payload]))
   }
 
   handleMessage(event) {
@@ -199,14 +650,88 @@ class SymboDialerClient {
     const data = event.data
     if (!data || typeof data.type !== 'string') return
 
-    if (data.type === RESULT) {
+    const isResult = data.type === RESULT
+    if (!isResult && !Object.values(EVENTS).includes(data.type)) return
+
+    // Anything the frame says at all — ready, auth.required, an answer, or a
+    // refusal of the handshake — proves it is listening and has recorded our
+    // origin, which is the whole job of the hello loop and the mount timer.
+    // Before the handshake completes the frame only ever posts in answer to
+    // our own hello, so there is no message here that is not contact.
+    this.markContacted()
+
+    if (isResult) {
       this.settle(data.payload || {})
       return
     }
 
-    if (!Object.values(EVENTS).includes(data.type)) return
+    this.receive(publicName(data.type), data.payload || {})
+  }
 
-    this.emit(publicName(data.type), data.payload || {})
+  // Update what the client knows before listeners run, so a handler that
+  // reads `dialer.user` or `dialer.warnings` sees the state the event
+  // describes.
+  receive(name, payload) {
+    // A refused handshake arrives as both an `error` and a `warning` with the
+    // same code; the warning is the one that always carries a sentence. Keyed
+    // on the code rather than the event name, so an unrelated pre-ready error
+    // cannot kill a mount that would still have gone ready. rejectMount()
+    // forgets the promise, so the pair and any repeat cost nothing, and a
+    // refusal arriving after `ready` leaves the resolved mount alone.
+    if (
+      !this.ready &&
+      (name === 'error' || name === 'warning') &&
+      HANDSHAKE_REFUSALS.has(payload.code)
+    ) {
+      this.rejectMount(
+        new SymboDialerError(payload.code, payload.message || payload.code)
+      )
+    }
+
+    switch (name) {
+      case 'ready':
+        this.onReady(payload)
+        break
+      case 'auth.required':
+        if (!this.onAuthRequired(payload)) return
+        break
+      case 'resize':
+        this.applySize(payload)
+        break
+      case 'warning':
+        if (payload.code) this.warnings.set(payload.code, payload.message ?? '')
+        break
+      case 'warning.cleared':
+        this.warnings.delete(payload.code)
+        break
+      case 'device.ready':
+        this.deviceReady = true
+        break
+      case 'device.error':
+        this.deviceReady = false
+        break
+      case 'session.started':
+      case 'session.concurrentCallsChanged':
+        if (isFiniteNumber(payload.concurrentCalls)) {
+          this.concurrentCalls = payload.concurrentCalls
+        }
+        if (typeof payload.concurrentCallsLocked === 'boolean') {
+          this.concurrentCallsLocked = payload.concurrentCallsLocked
+        }
+        break
+      case 'update.available':
+        this.updateAvailable = true
+        break
+      case 'session.ended':
+        // With no session running, the count is what a new one gets when
+        // nobody sets it: the lock, which it already holds, or one line.
+        if (!this.concurrentCallsLocked) this.concurrentCalls = MIN_CONCURRENT_CALLS
+        break
+      default:
+        break
+    }
+
+    this.emit(name, payload)
   }
 
   /* -------------------------------------------------------------- commands */
@@ -218,58 +743,105 @@ class SymboDialerClient {
    * so the blockers that stop a dial — no outcome saved on the last call, the
    * dialer not set up, calling not enabled — reach the caller as a catch on
    * the dial() they wrote, rather than as an event they had to know to listen
-   * for.
+   * for. Success resolves with the answer's `data`.
    */
-  settle({ requestId, ok, code, message }) {
-    const entry = this.pending.get(requestId)
+  settle(payload) {
+    const entry = this.pending.get(payload.requestId)
     if (!entry) return
 
-    this.pending.delete(requestId)
+    this.pending.delete(payload.requestId)
     clearTimeout(entry.timer)
 
-    if (ok) entry.resolve()
-    else entry.reject(new SymboDialerError(code || 'UNKNOWN', message))
+    if (payload.ok) {
+      entry.resolve(payload.data ?? {})
+      return
+    }
+
+    // `error: { code, message }` is the shape; a flat `code` / `message` is
+    // what the first embed build sent, and costs nothing to keep reading.
+    const error = payload.error || payload
+    entry.reject(
+      new SymboDialerError(error.code || CLIENT_ERRORS.UNKNOWN, error.message)
+    )
   }
 
-  send(type, payload = {}) {
-    if (this.destroyed) {
-      return Promise.reject(
-        new SymboDialerError('DESTROYED', 'This dialer has been destroyed.')
-      )
-    }
-    if (!this.ready) {
+  send(type, payload = {}, { timeoutMs } = {}) {
+    if (this.destroyed) return Promise.reject(destroyedError())
+
+    if (!this.mountPromise) {
       return Promise.reject(
         new SymboDialerError(
-          'NOT_READY',
+          CLIENT_ERRORS.NOT_MOUNTED,
+          'The dialer is not mounted. Call mount() first.'
+        )
+      )
+    }
+
+    if (!this.ready && !PRE_READY_COMMANDS.has(type)) {
+      return Promise.reject(
+        new SymboDialerError(
+          CLIENT_ERRORS.NOT_READY,
           'The dialer is not ready yet. Wait for mount() to resolve, or for the "ready" event.'
         )
       )
     }
 
-    const requestId = `r${++this.requestSeq}`
+    const budget = timeoutMs ?? this.commandTimeoutMs
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId)
-        reject(
-          new SymboDialerError(
-            'COMMAND_TIMEOUT',
-            `Symbo did not answer "${publicName(type)}" within ${COMMAND_TIMEOUT_MS}ms.`
+      const post = () => {
+        const requestId = `r${++this.requestSeq}`
+
+        const timer = setTimeout(() => {
+          this.pending.delete(requestId)
+          reject(
+            new SymboDialerError(
+              CLIENT_ERRORS.COMMAND_TIMEOUT,
+              `Symbo did not answer "${publicName(type)}" within ${budget}ms.`
+            )
           )
+        }, budget)
+
+        this.pending.set(requestId, { resolve, reject, timer })
+
+        this.iframe.contentWindow.postMessage(
+          { type, payload, requestId, protocolVersion: PROTOCOL_VERSION },
+          this.origin
         )
-      }, COMMAND_TIMEOUT_MS)
+      }
 
-      this.pending.set(requestId, { resolve, reject, timer })
-
-      this.iframe.contentWindow.postMessage(
-        { type, payload, requestId, protocolVersion: PROTOCOL_VERSION },
-        this.origin
-      )
+      // A pre-ready command sent before the frame has said anything (signIn
+      // straight after mount, typically) waits for the first word from it
+      // rather than being dropped on a frame that isn't listening yet.
+      if (this.contacted) post()
+      else this.awaitingContact.push({ post, reject })
     })
   }
 
+  flushAwaitingContact(err) {
+    const waiting = this.awaitingContact
+    this.awaitingContact = []
+    waiting.forEach(({ post, reject }) => (err ? reject(err) : post()))
+  }
+
+  /**
+   * Place a call. Either `number` (any format your records hold) or
+   * `prospectId` (a Symbo prospect, optionally with the `phoneNumberId` to
+   * dial). Resolves with `{ callId }` — `callId` is `null` when the carrier
+   * never reported the call ringing; the `call.*` events carry the id once it
+   * is known.
+   *
+   * The frame waits up to 15 s for that id, so this is the one command
+   * `commandTimeoutMs` does not shorten: a small one would time out calls
+   * that are really ringing.
+   */
   dial(options = {}) {
-    return this.send(COMMANDS.DIAL, options)
+    if (!options.number && !options.prospectId) {
+      return Promise.reject(invalid('dial needs a number or a prospectId.'))
+    }
+    return this.send(COMMANDS.DIAL, options, {
+      timeoutMs: Math.max(this.commandTimeoutMs, DIAL_TIMEOUT_MS),
+    })
   }
 
   hangUp() {
@@ -280,46 +852,235 @@ class SymboDialerClient {
     return this.send(COMMANDS.SET_CONTACT, options)
   }
 
+  getState() {
+    return this.send(COMMANDS.GET_STATE)
+  }
+
+  answerIncoming() {
+    return this.send(COMMANDS.ANSWER_INCOMING)
+  }
+
+  ignoreIncoming() {
+    return this.send(COMMANDS.IGNORE_INCOMING)
+  }
+
+  /**
+   * Sign the rep in silently with a token your server signed.
+   *
+   * `token` is a short-lived RS256 JWT minted for the rep who is logged into
+   * YOUR app — mint it for the current session's user, never for a user id
+   * read from the request body. It must carry an `organization_id` claim
+   * naming the Symbo organization the rep belongs to; one profile can serve
+   * several, and the claim says which. `profileId` is the sign-in profile
+   * id Symbo issued you; it is not a secret.
+   *
+   * Resolves with `{ user }`; a `ready` event follows. Works before mount()
+   * has resolved, which is the point. Sessions last 8 hours — listen for
+   * `auth.required` and call this again to renew silently.
+   */
+  signIn(options = {}) {
+    if (!options.token) {
+      return Promise.reject(invalid('signIn needs the token your server signed.'))
+    }
+    if (!options.profileId) {
+      return Promise.reject(invalid('signIn needs the profileId Symbo issued you.'))
+    }
+    return this.send(COMMANDS.SIGN_IN, { token: options.token, profileId: options.profileId })
+  }
+
+  /**
+   * Sign the rep out of Symbo in this frame, and forget the session.
+   *
+   * Call it when your own user logs out, and before signing a different rep
+   * in: `signIn()` while someone is signed in answers with them rather than
+   * switching. Resolves with `{ signedOut }` — false when nobody was signed
+   * in. The frame then reloads signed out and says `auth.required`. Refused
+   * with SESSION_ACTIVE while a power-dial session runs, CALL_IN_PROGRESS
+   * while a call is up or ringing, and POSTCALL_DETAILS_REQUIRED while the
+   * last call's required outcome is unsaved. Check `hasCapability('signOut')`
+   * against an older Symbo release, which answers UNKNOWN_COMMAND.
+   */
+  signOut() {
+    return this.send(COMMANDS.SIGN_OUT).then((result) => {
+      if (result && result.signedOut) this.forgetFrame()
+      return result
+    })
+  }
+
+  /**
+   * Reload the frame, for a newer Symbo build (`dialer.updateAvailable`, the
+   * `update.available` event) or to recover it. The frame never reloads itself
+   * for a new build, so this is how it gets one. The rep stays signed in;
+   * `frame.reloaded { requested: true }` and a fresh `ready` follow. Refused,
+   * like signOut, with SESSION_ACTIVE, CALL_IN_PROGRESS or
+   * POSTCALL_DETAILS_REQUIRED while it would cut something off. Check
+   * `hasCapability('reload')` against an older Symbo release.
+   */
+  reload() {
+    return this.send(COMMANDS.RELOAD).then((result) => {
+      if (result && result.reloading) {
+        this.reloadRequested = true
+        this.forgetFrame()
+      }
+      return result
+    })
+  }
+
+  // The frame's document finished loading. After the first load, a frame
+  // that had said `ready` loading again has reloaded — asked for, or not (the
+  // rep signed out in another tab, the browser discarded it) — and lost what
+  // it held: a session loaded in it, a call waiting for its outcome. Say so
+  // before its new `ready`, then start the handshake again.
+  onFrameLoad() {
+    if (this.ready || this.reloadRequested) {
+      const requested = this.reloadRequested
+      this.reloadRequested = false
+      if (this.ready) this.forgetFrame()
+      this.emit('frame.reloaded', { requested })
+    }
+    this.startSayingHello()
+  }
+
+  // The frame has signed the rep out and is reloading. Until the new document
+  // speaks, treat it as a frame we have not heard from: commands wait for it,
+  // and its auth.required is news rather than a repeat. What the old document
+  // told us about the rep and its warnings goes with it.
+  forgetFrame() {
+    this.ready = false
+    this.authPending = false
+    this.contacted = false
+    this.user = null
+    this.organization = null
+    this.concurrentCalls = null
+    this.concurrentCallsLocked = false
+    this.updateAvailable = false
+    this.deviceReady = false
+    for (const code of [...this.warnings.keys()]) {
+      this.warnings.delete(code)
+      this.emit('warning.cleared', { code })
+    }
+  }
+
+  /**
+   * Open Symbo's sign-in page in a new tab, for the rep to sign in by hand.
+   *
+   * Call it from a click handler: browsers block new tabs opened any other
+   * way. The URL comes from `auth.required`, so there is nothing to open
+   * until that has arrived — listen for it and show your button then. When
+   * the sign-in completes the frame picks it up and `ready` follows.
+   *
+   * The returned Window is for closing or focusing the tab, nothing more.
+   * A page served with `Cross-Origin-Opener-Policy: same-origin` has its
+   * handle severed the moment the login document commits, after which
+   * `closed` reads true: wait for `ready`, not for the tab to close.
+   */
+  openSignIn() {
+    if (!this.loginUrl) {
+      throw new SymboDialerError(
+        CLIENT_ERRORS.NO_LOGIN_URL,
+        'Symbo has not asked for a sign-in. Wait for the "auth.required" event.'
+      )
+    }
+
+    // Not the `noopener` feature: per the HTML window-open steps it makes
+    // window.open() return null even when the tab opens, which is
+    // indistinguishable from a blocked popup. Open, then disown by hand.
+    let opened = null
+    try {
+      opened = window.open(this.loginUrl, '_blank')
+    } catch {
+      // A sandboxed iframe without allow-popups throws rather than returning
+      // null. Same story for the caller: there is no tab.
+      opened = null
+    }
+
+    if (!opened) {
+      throw new SymboDialerError(
+        CLIENT_ERRORS.POPUP_BLOCKED,
+        'The browser blocked the sign-in tab. Call openSignIn() from a click handler.'
+      )
+    }
+
+    // What `noopener` was there for: the login tab must not be able to
+    // navigate the partner's page through window.opener.
+    try {
+      opened.opener = null
+    } catch {
+      // Some engines refuse the cross-origin set; the tab is open either way.
+    }
+
+    return opened
+  }
+
+  hasCapability(name) {
+    return this.capabilities.includes(name)
+  }
+
   destroy() {
     window.removeEventListener('message', this.handleMessage)
     this.stopSayingHello()
+    this.clearMountTimer()
     this.iframe?.remove()
 
     // Anything still waiting on an answer never gets one now. Reject rather
     // than leave the caller's await hanging until the timeout.
+    const err = destroyedError()
     this.pending.forEach(({ reject, timer }) => {
       clearTimeout(timer)
-      reject(
-        new SymboDialerError('DESTROYED', 'This dialer has been destroyed.')
-      )
+      reject(err)
     })
     this.pending.clear()
+    this.flushAwaitingContact(err)
+    this.rejectMount(err)
 
     this.destroyed = true
     this.ready = false
+    this.contacted = false
     this.iframe = null
     this.listeners.clear()
   }
 }
 
-export const SymboDialer = {
-  /**
-   * Mount the dialer into `container` and resolve once it can place calls.
-   *
-   * Resolution waits on a signed-in dialer, so a first-time user has to
-   * complete sign-in inside the frame before this settles. Listen for
-   * `auth.required` if you need to react to that sooner — for instance to
-   * expand a dialer your layout keeps collapsed.
-   */
-  mount(options = {}) {
-    if (!options.container) {
-      throw new SymboDialerError(
-        'INVALID_OPTIONS',
-        'container is required and must be a DOM element.'
+const destroyedError = () =>
+  new SymboDialerError(CLIENT_ERRORS.DESTROYED, 'This dialer has been destroyed.')
+
+function resolveMode(mode, hidden) {
+  if (mode === undefined && hidden !== undefined) {
+    if (!warnedAboutHiddenOption) {
+      warnedAboutHiddenOption = true
+      console.warn(
+        "[symbo] the `hidden` option is deprecated; pass mode: 'hidden' instead."
       )
     }
+    // `hidden: false` kept its old meaning rather than picking up the new
+    // default: it was written when compact was the only other mode.
+    return hidden ? MODES.HIDDEN : MODES.COMPACT
+  }
+  // No mode at all is the original `?embed=1`: Symbo's own dialer.
+  if (mode === undefined) return MODES.WIDGET
+  if (!Object.values(MODES).includes(mode)) {
+    throw invalid(
+      `mode must be 'widget', 'compact' or 'hidden', not ${JSON.stringify(mode)}.`
+    )
+  }
+  return mode
+}
 
-    return new SymboDialerClient(options).mount()
+export const SymboDialer = {
+  /**
+   * Create a client without mounting it. Subscribe to `auth.required` and
+   * `warning`, wire up your sign-in button, then call `mount()`.
+   */
+  create(options = {}) {
+    return new SymboDialerClient(options)
+  },
+
+  /**
+   * `create(options).mount()`: mount the dialer into `container` and resolve
+   * with the client once it can place calls.
+   */
+  mount(options = {}) {
+    return SymboDialer.create(options).mount()
   },
 }
 

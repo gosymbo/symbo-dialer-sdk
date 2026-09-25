@@ -1,62 +1,74 @@
-<!doctype html><meta charset="utf-8">
-<body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#eef1f7;color:#333">
-<div style="text-align:center"><b>Stub dialer</b><br><small id="s">waiting for hello…</small></div>
-<script>
-const V = 2
-let call = null
-let seq = 0
-const post = (type, payload = {}) =>
-  parent.postMessage({ type, payload, protocolVersion: V }, '*')
-
-// Answer a command the way the bridge does: exactly one result per command,
-// carrying back the requestId, so the SDK can settle the promise it returned.
-const ok = (d) => d.requestId && post('symbo:result', { requestId: d.requestId, ok: true })
-const refuse = (d, code, message) => {
-  if (d.requestId) post('symbo:result', { requestId: d.requestId, ok: false, code, message })
-  else post('symbo:error', { code, message })
-}
-
-addEventListener('message', (e) => {
-  const d = e.data
-  if (!d || typeof d.type !== 'string') return
-  document.getElementById('s').textContent = 'last: ' + d.type
-
-  if (d.type === 'symbo:hello') {
-    post('symbo:ready', {
-      protocolVersion: V,
-      user: { id: 'u-1', email: 'rep@acme.test', name: 'Sam Rep' },
-      sizeInfo: { width: 420, height: 485 },
-    })
-  }
-  if (d.type === 'symbo:dial') {
-    const { number, externalId } = d.payload
-    // The bridge passes the number through as-is; Symbo normalises it on the
-    // way to the call. Only an empty one is refused.
-    if (typeof number !== 'string' || !number.trim())
-      return refuse(d, 'INVALID_NUMBER', 'number is required')
-    if (call)
-      return refuse(d, 'CALL_IN_PROGRESS', 'A call is already active. Hang up before dialing again.')
-
-    call = 'call-' + ++seq
-    const id = call
-    ok(d)
-    const from = '+13855550147'
-    post('symbo:call.started', { callId: id, number, from, externalId, direction: 'outbound' })
-    setTimeout(() => post('symbo:call.answered', { callId: id, number, from, externalId, direction: 'outbound' }), 400)
-    // Symbo recognising the number a moment after the dial, which is the case
-    // contact.matched exists for.
-    setTimeout(() => post('symbo:contact.matched', { number, externalId, prospect: { id: 'p-771', fullName: 'Dana Whitfield' } }), 600)
-    setTimeout(() => { call = null; post('symbo:call.ended', { callId: id, externalId, durationSeconds: 87, answered: true }) }, 900)
-    setTimeout(() => post('symbo:call.completed', { callId: id, externalId, durationSeconds: 87, answered: true, disposition: 'Connected', outcome: 'Payment plan agreed', note: 'Calling back Thursday.' }), 1300)
-  }
-  if (d.type === 'symbo:hangUp') {
-    if (call) {
-      const id = call
-      call = null
-      post('symbo:call.ended', { callId: id, externalId: null, durationSeconds: 12, answered: false })
-    }
-    ok(d)
-  }
-  if (d.type === 'symbo:setContact') ok(d)
-})
-</script>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Stub dialer</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #eef1f7;
+        color: #333;
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+      .strip {
+        box-sizing: border-box;
+        height: 56px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 12px;
+        border: 1px dashed #b8c0d4;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #9aa3b8;
+        flex: none;
+      }
+      .dot.ok {
+        background: #1a7f52;
+      }
+      .dot.warn {
+        background: #9a5b12;
+      }
+      .who {
+        font-weight: 600;
+      }
+      .state {
+        color: #5b6479;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .spacer {
+        flex: 1;
+      }
+      button {
+        font: inherit;
+        font-size: 12px;
+        padding: 3px 8px;
+        border-radius: 4px;
+        border: 1px solid #b8c0d4;
+        background: #fff;
+        color: #333;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="strip">
+      <span class="dot" id="dot"></span>
+      <span class="who" id="who">Stub dialer</span>
+      <span class="state" id="state">waiting for hello…</span>
+      <span class="spacer"></span>
+      <button id="ring" title="Ring an inbound call now">Inbound</button>
+      <button id="blip" title="Drop the realtime connection for 3 s">Blip</button>
+      <button id="auth">Sign in</button>
+    </div>
+    <script src="stub.js"></script>
+  </body>
+</html>

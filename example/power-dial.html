@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Power Dial — Symbo embed reference</title>
+  <!--
+    A single-file reference for @symbo/dialer-embed: sign in by redirect, start a
+    dial session you built in Symbo, and watch contacts move across the board.
+    From the repository: `npm run demo`, then open /example/power-dial.html.
+    Add ?appUrl=http://localhost:3000/example/stub to play against the offline stub.
+  -->
+  <style>
+    :root { --bg: #f6f7fb; --panel: #fff; --ink: #14161c; --muted: #6b7280; --line: #e5e7eb; --accent: #5b5bd6;
+            --queued: #94a3b8; --progress: #2563eb; --attempted: #d97706; --completed: #059669; --live: #dc2626; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
+    h2, h3 { margin: 0 0 12px; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .muted { color: var(--muted); font-size: 12px; }
+    .err { color: var(--live); font-size: 12px; margin: 8px 0 0; }
+    .err:empty { display: none; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .switch { display: inline-flex; gap: 6px; align-items: center; margin: 0; font-weight: 400; color: var(--ink); }
+    .switch input { width: auto; margin: 0; }
+
+    header { display: flex; gap: 12px; align-items: center; padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    header b { margin-right: auto; font-size: 16px; }
+    main { display: grid; grid-template-columns: 400px 1fr; gap: 20px; padding: 20px; align-items: start; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    label { display: block; margin-bottom: 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
+    input { width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+
+    .btn { position: relative; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.end { margin-left: auto; padding: 6px 10px; font-size: 12px; color: var(--muted); }
+    .btn.end:hover:not(:disabled) { color: var(--live); border-color: var(--live); }
+    .btn.busy { color: transparent; opacity: 1; }
+    .btn.busy::after { content: ''; position: absolute; inset: 0; margin: auto; width: 14px; height: 14px; border-radius: 50%;
+                       border: 2px solid var(--muted); border-right-color: transparent; animation: spin .6s linear infinite; }
+    .btn.primary.busy::after { border-color: #fff; border-right-color: transparent; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .pill, .chip { padding: 3px 10px; border-radius: 999px; background: #eef0f6; color: var(--muted); font-size: 12px; font-weight: 600; }
+    .chip { background: var(--panel); border: 1px solid var(--line); font-weight: 400; }
+    .pill.ok { background: #e7f6ef; color: var(--completed); }
+    .pill.warn { background: #fdf1e3; color: var(--attempted); }
+    .pill.bad { background: #fdeaea; color: var(--live); }
+
+    .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+    .queued { --c: var(--queued); } .progress { --c: var(--progress); } .attempted { --c: var(--attempted); } .completed { --c: var(--completed); }
+    .column { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-height: 180px; }
+    .column h3 { color: var(--c); }
+    .contact { border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+    .contact small { display: block; color: var(--muted); }
+    .contact.talking { --c: var(--live); box-shadow: 0 0 0 3px #fdeaea; }
+
+    .lines { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: var(--muted); }
+    .lines select { width: auto; margin: 0; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font: inherit; color: var(--ink); }
+    .lines .lock { display: inline-flex; color: var(--muted); }
+
+    .live { position: sticky; bottom: 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .live > div:first-child { margin-right: auto; }
+    .timer { font-weight: 700; color: var(--live); font-variant-numeric: tabular-nums; }
+    #outcomes { width: 100%; }
+    #log { max-height: 220px; overflow: auto; margin-top: 10px; font: 12px/1.6 ui-monospace, monospace; color: var(--muted); }
+    #log b { color: var(--ink); }
+    @media (max-width: 1100px) { main { grid-template-columns: 1fr; } .board { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <header>
+    <b>Power Dial</b>
+    <span class="muted" id="who">not connected</span>
+    <span class="pill" id="pill">offline</span>
+    <button class="btn" id="update" hidden title="A newer Symbo version is ready; reloading the dialer picks it up">Update Symbo</button>
+    <button class="btn primary" id="signin" hidden>Sign in to Symbo</button>
+  </header>
+
+  <main>
+    <aside>
+      <section class="panel">
+        <h2>1 · Connect</h2>
+        <label>Symbo app URL <input id="appUrl" /></label>
+        <label>Symbo API URL <input id="apiUrl" /></label>
+        <label>API token <span class="muted">· loads your call outcomes</span> <input id="token" type="password" /></label>
+        <div class="row">
+          <button class="btn primary" id="connect">Connect</button>
+          <button class="btn" id="disconnect" hidden>Disconnect</button>
+        </div>
+        <p class="err" id="connectErr"></p>
+        <div id="slot"></div>
+      </section>
+
+      <section class="panel">
+        <h2>2 · Dial session</h2>
+        <p class="muted">Build the list in Symbo, then paste its session id here.</p>
+        <label>Dial session id <input id="sessionInput" placeholder="paste it here" /></label>
+        <button class="btn primary" id="start" disabled>Start dialing</button>
+        <p class="err" id="startErr"></p>
+      </section>
+    </aside>
+
+    <div>
+      <div class="row" id="counts" style="margin-bottom: 12px"></div>
+      <div class="panel row">
+        <button class="btn" id="resume" disabled>Resume</button>
+        <button class="btn" id="skip" disabled>Skip current</button>
+        <button class="btn" id="hangup" disabled>Hang up</button>
+        <!-- Lines rung at once: a dropdown, or a lock when the organization fixes the number -->
+        <span class="lines" id="lines" hidden>
+          <span class="lock" id="linesLock" hidden>
+            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 1a5 5 0 0 0-5 5v4H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5zM9 10V6a3 3 0 0 1 6 0v4z"/></svg>
+          </span>
+          <span id="linesFixed" hidden></span>
+          <select id="linesSelect" aria-label="Lines rung at once">
+            <option value="" id="linesAsCreated">As created</option>
+            <option value="1">1 line</option>
+            <option value="2">2 lines</option>
+            <option value="3">3 lines</option>
+            <option value="4">4 lines</option>
+          </select>
+        </span>
+        <label class="switch"><input type="checkbox" id="autoResume" /> Auto-resume after outcome</label>
+        <span class="muted" id="status">no session</span>
+        <button class="btn end" id="end" disabled>✕ End</button>
+        <p class="err" id="controlErr" style="width: 100%"></p>
+      </div>
+
+      <div class="board">
+        <div class="column queued"><h3>Queued</h3><div id="queuedList"></div><span class="muted" id="queuedMore"></span></div>
+        <div class="column progress"><h3>In progress <span id="progressCount"></span></h3><div id="progressList"></div></div>
+        <div class="column attempted"><h3>Attempted <span id="attemptedCount"></span></h3><div id="attemptedList"></div></div>
+        <div class="column completed"><h3>Completed <span id="completedCount"></span></h3><div id="completedList"></div></div>
+      </div>
+
+      <section class="panel live" id="live" hidden>
+        <div><b id="liveName"></b><br /><span class="muted" id="liveNumber"></span></div>
+        <span class="timer" id="liveTimer"></span>
+        <span class="pill" id="liveState"></span>
+        <div class="row" id="outcomes" hidden></div>
+        <p class="err" id="liveErr"></p>
+      </section>
+
+      <details class="panel" open>
+        <summary>Events from Symbo</summary>
+        <div id="log"></div>
+      </details>
+    </div>
+  </main>
+
+  <!-- The SDK's own source, one directory up. With the published package, replace this with
+       <script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.2/dist/symbo-dialer.min.js"></script>
+       and pin the version you tested against. -->
+  <script type="module">
+    import { SymboDialer } from '../src/index.js'
+    window.SymboDialer = SymboDialer
+  </script>
+  <script>
+    // Every element with an id: ui.connect, ui.pill, ui.queuedList …
+    const ui = Object.fromEntries([...document.querySelectorAll('[id]')].map((el) => [el.id, el]))
+
+    const rows = new Map() // queuedCallId → contact on the board
+    let dialer = null
+    let activeSession = null
+    let outcomes = []
+    let counts = {}
+    let liveId = null // the call the rep is on
+    let skippedId = null
+    let ending = false // End was pressed during a call: the session ends once that call's post-call step is done
+    let postCall = null // the call waiting for an outcome
+    let timer = null
+    let reconciling = false
+    let reconcileAgain = false
+    let lines = null // what Start asks for, when the rep picked a number before starting
+
+    // ⚠ Your Symbo environment. Remembered in this browser.
+    const saved = JSON.parse(localStorage.getItem('power-dial') || '{}')
+    ui.appUrl.value = new URLSearchParams(location.search).get('appUrl') || saved.appUrl || 'https://app.symbo.ai'
+    ui.apiUrl.value = saved.apiUrl || 'https://api.symbo.ai'
+    ui.token.value = saved.token || ''
+
+    /* ── Connect and sign in ─────────────────────────────────────────── */
+
+    ui.connect.onclick = () => busy(ui.connect, async () => {
+      if (!window.SymboDialer) return (ui.connectErr.textContent = 'The Symbo SDK did not load — check the <script> URL.')
+      localStorage.setItem('power-dial', JSON.stringify({ appUrl: ui.appUrl.value, apiUrl: ui.apiUrl.value, token: ui.token.value }))
+      ui.connectErr.textContent = ''
+
+      dialer = SymboDialer.create({
+        container: ui.slot,
+        appUrl: ui.appUrl.value.trim(),
+        mode: 'compact', // 'widget' | 'compact' | 'hidden'
+      })
+      listen(dialer)
+      refresh()
+
+      // Spin until Symbo answers, not until the rep has finished signing in.
+      const answered = new Promise((resolve) => {
+        dialer.once('ready', resolve)
+        dialer.once('auth.required', resolve)
+      })
+      const mounted = dialer.mount().catch((error) => {
+        showError(ui.connectErr, error)
+        dialer.destroy()
+        dialer = null
+        refresh()
+      })
+      await Promise.race([answered, mounted])
+    })
+
+    // Refused while a call or a session is running: reload between calls.
+    ui.update.onclick = () => busy(ui.update, async () => {
+      try {
+        await dialer.reload()
+      } catch (error) {
+        showError(ui.connectErr, error)
+      }
+    })
+
+    ui.signin.onclick = () => {
+      try {
+        dialer.openSignIn() // redirect sign-in: Symbo's own login page, in a new tab
+      } catch (error) {
+        showError(ui.connectErr, error)
+      }
+    }
+
+    ui.disconnect.onclick = () => {
+      dialer?.destroy()
+      dialer = activeSession = null
+      ending = false
+      rows.clear()
+      endLive()
+      ui.counts.innerHTML = ''
+      ui.status.textContent = 'no session'
+      ui.lines.hidden = true
+      ui.who.textContent = 'not connected'
+      ui.disconnect.hidden = ui.signin.hidden = ui.update.hidden = true
+      pill(ui.pill, 'offline')
+      render()
+      refresh()
+    }
+
+    /* ── What Symbo tells us ─────────────────────────────────────────── */
+
+    function listen(d) {
+      d.on('*', log)
+
+      d.on('auth.required', () => {
+        pill(ui.pill, 'signed out', 'warn')
+        ui.signin.hidden = false
+      })
+      d.on('ready', (p) => {
+        ui.signin.hidden = true
+        ui.update.hidden = !d.updateAvailable
+        ui.disconnect.hidden = false
+        ui.who.textContent = `${p.user?.name || 'rep'} · ${p.organization?.name || ''}`
+        pill(ui.pill, p.deviceReady ? 'ready' : 'device not ready', p.deviceReady ? 'ok' : 'warn')
+        if (!p.powerDialing) ui.connectErr.textContent = 'Power dialing is not enabled for this organization.'
+        loadOutcomes()
+        adoptRunningSession()
+        showLines()
+        refresh()
+      })
+      // Symbo never reloads the dialer for a newer version by itself; offer it when the rep is free.
+      d.on('update.available', () => (ui.update.hidden = false))
+      // The dialer reloaded (asked for, or not). Whatever it held is gone: a session running in it is
+      // paused on Symbo's side, and a call still waiting for its outcome has to be saved from your
+      // server (PUT /calls/{id}). Start picks the session back up.
+      d.on('frame.reloaded', (p) => {
+        ui.update.hidden = true
+        if (!activeSession) return
+        ui.sessionInput.value = activeSession
+        activeSession = null
+        ending = false
+        skippedId = null
+        endLive()
+        ui.status.textContent = p.requested
+          ? 'reloaded · press Start to carry on'
+          : 'Symbo reloaded · press Start to pick the session back up'
+      })
+      d.on('device.ready', () => pill(ui.pill, 'ready', 'ok'))
+      d.on('device.error', () => pill(ui.pill, 'device error', 'bad'))
+      d.on('permission.denied', () => pill(ui.pill, 'no microphone', 'bad'))
+
+      d.on('session.started', (p) => {
+        activeSession = p.dialSessionId
+        ui.status.textContent = `dialing · ${linesText(p.concurrentCalls)}`
+        showLines()
+        refresh()
+        reconcile()
+      })
+      // Whoever changed it: this page, an admin in Symbo, or the organization's lock. It applies from the next round.
+      d.on('session.concurrentCallsChanged', showLines)
+      // 'requested' is the outcome saved with then: 'pause' (this page has no Pause button)
+      d.on('session.paused', (p) => (p.reason === 'requested' ? waitForResume() : (ui.status.textContent = `paused · ${p.reason}`)))
+      d.on('session.resumed', () => (ui.status.textContent = 'dialing'))
+      d.on('session.noMoreCalls', () => (ui.status.textContent = 'queue empty'))
+      // The session is over: clear it off the page.
+      d.on('session.ended', () => {
+        activeSession = null
+        ending = false
+        skippedId = null
+        rows.clear()
+        counts = {}
+        ui.counts.innerHTML = ''
+        ui.sessionInput.value = ''
+        ui.status.textContent = 'ended'
+        render()
+        endLive()
+        showLines()
+      })
+      d.on('session.queue.updated', (p) => showCounts(p.counts))
+
+      d.on('session.leg.ringing', (p) => update(p, { live: true, state: 'ringing', outcome: null })) // may be a redial
+      d.on('session.leg.answered', (p) => update(p, { live: true, state: 'answered' }))
+      d.on('session.leg.connected', (p) => {
+        update(p, { live: true, state: 'connected' })
+        startLive(p)
+      })
+      d.on('session.leg.ended', legEnded)
+      d.on('session.postCall', onPostCall)
+      d.on('call.completed', (p) => {
+        const row = [...rows.values()].find((r) => r.callId === p.callId)
+        if (row) update(row, { outcome: p.outcome?.name })
+      })
+    }
+
+    /* ── The board ───────────────────────────────────────────────────── */
+
+    // Add or move a contact. Every session event names it by queuedCallId.
+    function update(p, changes = {}) {
+      if (!activeSession) return // events that land after the session ended
+      const row = rows.get(p.queuedCallId) || { queuedCallId: p.queuedCallId, column: 'queued' }
+      row.name = p.prospectName || row.name || 'Contact'
+      row.number = p.number || row.number || ''
+      row.callId = p.callId || row.callId
+      Object.assign(row, changes)
+      if (row.live) row.column = 'progress'
+      rows.set(row.queuedCallId, row)
+      render()
+    }
+
+    // ⚠ Symbo can send session.postCall before or after session.leg.ended, so both handlers work in either order.
+
+    // Skipped, or its post-call step done → completed. Talked → waits in progress for its outcome. Anything else → an attempt.
+    function legEnded(p) {
+      const done = wasSkipped(p.queuedCallId) || isCompleted(p.queuedCallId)
+      const needsOutcome = !done && (postCall?.queuedCallId === p.queuedCallId || p.reason === 'completed')
+      update(p, {
+        live: false,
+        state: 'ended',
+        reason: p.reason,
+        column: done ? 'completed' : needsOutcome ? 'progress' : 'attempted',
+        needsOutcome,
+      })
+      if (p.queuedCallId === liveId && !needsOutcome) endLive()
+      reconcile()
+    }
+
+    function onPostCall(p) {
+      const skipped = wasSkipped(p.queuedCallId) || isCompleted(p.queuedCallId)
+      if (skipped || !p.outcomeRequired) {
+        update(p, { live: false, column: 'completed', needsOutcome: false })
+        endLive()
+        if (!skipped) carryOn(nextStep()) // Skip dials on by itself
+        return
+      }
+      update(p, { live: false, column: 'progress', needsOutcome: true })
+      postCall = p
+      showOutcomes(p)
+      refresh()
+    }
+
+    // A skipped call needs no outcome.
+    function wasSkipped(id) {
+      if (!id || id !== skippedId) return false
+      skippedId = null
+      return true
+    }
+
+    const isCompleted = (id) => rows.get(id)?.column === 'completed'
+
+    // getQueue() returns the rows still waiting or ringing. Anything that left it was attempted.
+    async function reconcile() {
+      if (!activeSession) return
+      if (reconciling) return (reconcileAgain = true)
+      reconciling = true
+      try {
+        const answer = await dialer.session.getQueue()
+        const listed = new Set(answer.queue.map((q) => q.queuedCallId))
+        for (const q of answer.queue) {
+          const column = { queued: 'queued', dialing: 'progress', in_progress: 'progress' }[q.status]
+          const row = rows.get(q.queuedCallId)
+          // The queue can lag behind the leg events, so it only adds contacts and re-queues finished ones.
+          const place = row ? column === 'queued' && !row.live && !row.needsOutcome : column
+          if (place) update(q, { column, attempts: q.attempts })
+        }
+        for (const row of rows.values()) {
+          const waiting = row.column === 'queued' || row.column === 'progress'
+          if (waiting && !listed.has(row.queuedCallId) && !row.live && !row.needsOutcome) row.column = 'attempted'
+        }
+        showCounts(answer.counts)
+      } catch {
+        // the session ended under us
+      } finally {
+        reconciling = false
+        if (reconcileAgain) {
+          reconcileAgain = false
+          reconcile()
+        }
+      }
+    }
+
+    // Pick up a session the rep already has running. It can load a moment after `ready`.
+    async function adoptRunningSession() {
+      for (let tries = 0; tries < 8 && dialer?.ready && !activeSession; tries++) {
+        const { session } = await dialer.getState().catch(() => ({}))
+        if (session?.dialSessionId) {
+          activeSession = ui.sessionInput.value = session.dialSessionId
+          ui.status.textContent = `${session.status || 'running'} · picked up from Symbo`
+          showLines()
+          showCounts(session.counts)
+          for (const leg of session.legs || []) {
+            update(leg, { live: true, state: leg.status })
+            if (leg.status === 'connected') startLive(leg)
+          }
+          refresh()
+          return reconcile()
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
+    }
+
+    // Draw at most once per burst of events.
+    let drawing = false
+    function render() {
+      if (drawing) return
+      drawing = true
+      queueMicrotask(() => {
+        drawing = false
+        const all = [...rows.values()]
+        for (const column of ['queued', 'progress', 'attempted', 'completed']) {
+          const list = all.filter((row) => row.column === column)
+          ui[`${column}List`].innerHTML = list.map(card).join('') || '<p class="muted">Nothing here.</p>'
+          if (ui[`${column}Count`]) ui[`${column}Count`].textContent = list.length
+        }
+        // getQueue() returns one page, so say when there are more than shown.
+        const shown = all.filter((row) => row.column === 'queued').length
+        ui.queuedMore.textContent = counts.queued > shown ? `showing ${shown} of ${counts.queued}` : ''
+      })
+    }
+
+    function card(row) {
+      const details = [row.number, row.attempts && `attempt ${row.attempts}`, row.live ? row.state : row.reason,
+                       row.outcome, row.needsOutcome && 'outcome needed']
+      const talking = row.live && row.state === 'connected' ? 'talking' : ''
+      return `<div class="contact ${talking}"><b>${esc(row.name)}</b><small>${details.filter(Boolean).map(esc).join(' · ')}</small></div>`
+    }
+
+    // Same buckets as the columns. `cancelled` has none of its own — it's an unanswered attempt.
+    function showCounts(c) {
+      if (!c) return
+      counts = c
+      const chips = { queued: c.queued, 'in progress': c.dialing, attempted: (c.attempted || 0) + (c.cancelled || 0),
+                      completed: c.completed, remaining: c.remaining }
+      if (c.removed) chips.removed = c.removed
+      ui.counts.innerHTML = Object.entries(chips).map(([name, n]) => `<span class="chip">${name} <b>${n ?? 0}</b></span>`).join('')
+      render()
+    }
+
+    /* ── The call bar and post-call ──────────────────────────────────── */
+
+    function startLive(p) {
+      liveId = p.queuedCallId
+      ui.liveName.textContent = p.prospectName || 'Contact'
+      ui.liveNumber.textContent = p.number || ''
+      pill(ui.liveState, 'connected', 'bad')
+      ui.outcomes.hidden = true
+      ui.liveErr.textContent = ''
+      ui.live.hidden = false
+      const started = Date.now()
+      clearInterval(timer)
+      timer = setInterval(() => (ui.liveTimer.textContent = new Date(Date.now() - started).toISOString().slice(14, 19)), 500)
+    }
+
+    function endLive() {
+      clearInterval(timer)
+      liveId = postCall = null
+      ui.live.hidden = true
+      ui.liveTimer.textContent = ''
+      refresh()
+    }
+
+    // Symbo holds the session until the outcome is saved.
+    function showOutcomes(p) {
+      clearInterval(timer)
+      ui.liveTimer.textContent = ''
+      ui.liveNumber.textContent = `${p.answered ? 'answered' : 'not answered'} · ${p.durationSeconds || 0}s`
+      pill(ui.liveState, 'outcome needed', 'warn')
+      ui.liveErr.textContent = outcomes.length ? '' : 'No outcomes loaded — add your API token and reconnect.'
+      ui.outcomes.innerHTML = outcomes.map((o) => `<button class="btn" data-id="${esc(o.id)}">${esc(o.name)}</button>`).join('')
+      ui.outcomes.hidden = ui.live.hidden = false
+    }
+
+    ui.outcomes.onclick = (event) => {
+      const button = event.target.closest('button')
+      if (!button || !postCall) return
+      const call = postCall
+      const buttons = ui.outcomes.querySelectorAll('button')
+      busy(button, async () => {
+        buttons.forEach((b) => (b.disabled = true)) // one outcome at a time
+        try {
+          const then = nextStep()
+          await dialer.session.saveOutcome({ callId: call.callId, outcomeId: button.dataset.id, then })
+          update(call, { column: 'completed', needsOutcome: false })
+          endLive()
+          if (then === 'pause') waitForResume()
+        } catch (error) {
+          showError(ui.liveErr, error)
+        } finally {
+          buttons.forEach((b) => (b.disabled = false))
+        }
+      })
+    }
+
+    // After the post-call step: finish an End pressed during the call, dial on, or wait for the rep to press Resume.
+    const nextStep = () => (ending ? 'end' : ui.autoResume.checked ? 'resume' : 'pause')
+    const waitForResume = () => activeSession && (ui.status.textContent = 'paused · press Resume to dial on')
+
+    // With no outcome to save, the next step is a command of its own.
+    function carryOn(then) {
+      if (then === 'pause') return waitForResume()
+      const sent = then === 'end' ? dialer.session.end({ force: true }) : dialer.session.resume()
+      sent.catch((error) => showError(ui.controlErr, error))
+    }
+
+    // ⚠ Demo only. In production your server holds the token and makes this call.
+    async function loadOutcomes() {
+      if (!ui.token.value.trim()) return
+      try {
+        const res = await fetch(`${ui.apiUrl.value.trim().replace(/\/$/, '')}/v1/callOutcomes?count=50`, {
+          headers: { authorization: `Bearer ${ui.token.value.trim()}` },
+        })
+        if (!res.ok) throw new Error(`${res.status} loading outcomes`)
+        outcomes = (await res.json()).data || []
+      } catch (error) {
+        ui.connectErr.textContent = `Could not load outcomes — ${error.message}`
+      }
+    }
+
+    /* ── Lines ───────────────────────────────────────────────────────── */
+
+    const linesText = (n) => `${n} line${n === 1 ? '' : 's'}`
+
+    // How many contacts each round rings. Locked by the organization: a lock and the fixed number.
+    // Otherwise a dropdown — before a session it is what Start asks for ("As created" asks for
+    // nothing, so the session rings the number your server created it with); during one it changes
+    // the session from its next round.
+    function showLines() {
+      const can = dialer?.ready && dialer.hasCapability('concurrentCalls') // an older Symbo release has no line control
+      ui.lines.hidden = !can
+      if (!can) return
+      const locked = dialer.concurrentCallsLocked
+      ui.linesLock.hidden = ui.linesFixed.hidden = !locked
+      ui.linesSelect.hidden = locked
+      ui.linesFixed.textContent = linesText(dialer.concurrentCalls)
+      ui.lines.title = locked
+        ? `Your organization rings ${linesText(dialer.concurrentCalls)} at once for every session`
+        : 'Lines rung at once'
+      if (locked) return
+      ui.linesAsCreated.hidden = ui.linesAsCreated.disabled = !!activeSession
+      ui.linesSelect.value = activeSession ? String(dialer.concurrentCalls) : lines ? String(lines) : ''
+    }
+
+    ui.linesSelect.onchange = async () => {
+      const n = Number(ui.linesSelect.value) || null
+      if (!activeSession) return (lines = n)
+      ui.linesSelect.disabled = true
+      ui.controlErr.textContent = ''
+      try {
+        await dialer.session.setConcurrentCalls(n)
+        ui.status.textContent = `${linesText(n)} from the next round`
+      } catch (error) {
+        showError(ui.controlErr, error) // e.g. CONCURRENT_CALLS_LOCKED, if the organization locked it meanwhile
+      } finally {
+        ui.linesSelect.disabled = false
+        showLines()
+      }
+    }
+
+    /* ── Session controls ────────────────────────────────────────────── */
+
+    const command = (button, run, errorEl = ui.controlErr) => {
+      button.onclick = () => busy(button, async () => {
+        errorEl.textContent = ''
+        try {
+          await run()
+        } catch (error) {
+          showError(errorEl, error)
+        }
+      })
+    }
+
+    ui.sessionInput.oninput = refresh
+    command(ui.start, () => {
+      rows.clear()
+      render()
+      const options = { dialSessionId: ui.sessionInput.value.trim() }
+      // Only a number the rep picked: otherwise the session rings what it was created with.
+      if (lines && !dialer.concurrentCallsLocked && dialer.hasCapability('concurrentCalls')) options.concurrentCalls = lines
+      return dialer.session.start(options)
+    }, ui.startErr)
+    command(ui.resume, () => dialer.session.resume())
+    command(ui.skip, () => {
+      skippedId = liveId
+      return untilDropped(liveId, dialer.session.skipCurrent().catch((error) => {
+        skippedId = null
+        throw error
+      }))
+    })
+    command(ui.hangup, () => untilDropped(liveId, dialer.hangUp()))
+    command(ui.end, async () => {
+      if (!confirm('End this dial session? Symbo marks it completed.')) return
+      ending = true
+      await dialer.session.end({ force: true }).catch((error) => {
+        ending = false
+        throw error
+      })
+      if (activeSession) ui.status.textContent = 'ending after this call'
+    })
+
+    // Hang up and Skip answer at once — keep the spinner until the call is over. Symbo reports that as
+    // session.postCall or session.leg.ended, whichever comes first.
+    async function untilDropped(id, sent) {
+      const offs = []
+      const dropped = new Promise((resolve) => {
+        const done = (p) => p.queuedCallId === id && resolve()
+        offs.push(dialer.on('session.leg.ended', done), dialer.on('session.postCall', done))
+        setTimeout(resolve, 8000)
+      })
+      try {
+        await sent
+        if (id) await dropped
+      } finally {
+        offs.forEach((off) => off())
+      }
+    }
+
+    /* ── Helpers ─────────────────────────────────────────────────────── */
+
+    // Enable what makes sense right now. A busy button stays disabled.
+    function refresh() {
+      const enable = (button, on) => (button.disabled = !on || button.classList.contains('busy'))
+      enable(ui.connect, !dialer)
+      enable(ui.start, dialer?.ready && ui.sessionInput.value.trim() && !activeSession)
+      for (const button of [ui.skip, ui.hangup, ui.end]) enable(button, activeSession)
+      enable(ui.resume, activeSession && !postCall) // save the outcome first
+    }
+
+    // Spinner on a button while its action runs.
+    async function busy(button, run) {
+      if (button.classList.contains('busy')) return
+      button.classList.add('busy')
+      button.disabled = true
+      try {
+        await run()
+      } finally {
+        button.classList.remove('busy')
+        refresh()
+      }
+    }
+
+    function log(name, payload) {
+      const line = document.createElement('div')
+      line.innerHTML = `<b>${esc(name)}</b> ${esc(JSON.stringify(payload).slice(0, 200))}`
+      ui.log.prepend(line)
+      ui.log.children[80]?.remove()
+    }
+
+    function pill(el, text, tone = '') {
+      el.textContent = text
+      el.className = `pill ${tone}`
+    }
+
+    const showError = (el, error) => (el.textContent = `${error.code || 'Error'} — ${error.message}`)
+    const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)
+  </script>
+</body>
+</html>
