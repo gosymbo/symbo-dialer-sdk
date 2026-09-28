@@ -5,10 +5,11 @@
 // integration) can be built with no Symbo account and no network. It answers
 // every command the SDK knows, replays a power-dial session (two lines unless
 // you set another number) through three rounds of dialing, rings an inbound
-// call while idle, lists a pair of audio devices, and raises a warning on
-// request. Add `lockLines=2` to the frame URL to play an organization that
-// fixes every session's number of lines, and `updateAfter=5000` to announce a
-// newer Symbo build that many milliseconds after `ready`.
+// call while idle, lists a pair of audio devices, mutes and plays keypad
+// digits on the call that is up, and raises a warning on request. Add
+// `lockLines=2` to the frame URL to play an organization that fixes every
+// session's number of lines, and `updateAfter=5000` to announce a newer Symbo
+// build that many milliseconds after `ready`.
 //
 // Timings are compressed: legs ring for a second or two, calls last a few
 // seconds. Everything else — the message names, payload shapes, refusal codes
@@ -94,6 +95,10 @@
   const INBOUND_REPEAT_MS = 40000
   const INBOUND_RING_MS = 20000
   const CONNECTED_CALL_MS = 6000
+  // The keypad: what one sendDigits may carry, and how far apart the frame
+  // plays the digits.
+  const DTMF_DIGITS = /^[0-9*#]{1,32}$/
+  const DTMF_GAP_MS = 200
 
   /* ------------------------------------------------------------------ state */
 
@@ -124,6 +129,22 @@
 
   // The power-dial session, if any.
   let session = null
+
+  // The rep's line: a one-off or inbound call while it lasts or, in a
+  // session, the rep's own leg. That leg drops when the rep hangs up or
+  // pauses, and resuming brings it back. Mute lasts as long as the line.
+  // Guess: it stays up when the contact hangs up, and drops on a skip.
+  let sessionLine = false
+  let muted = false
+  // When the keypad can play its next digit.
+  let keypadFreeAt = 0
+  const lineUp = () => !!call || (!!session && sessionLine)
+  // Who the keypad reaches: an answered call, or the connected contact.
+  const conversation = () => {
+    if (call) return call.status === 'connected' ? `call:${call.callId}` : null
+    const leg = sessionLine && sessionConnected()
+    return leg ? `leg:${leg.queuedCallId}` : null
+  }
 
   const timers = new Set()
   const later = (ms, fn) => {
@@ -198,7 +219,7 @@
       mode: MODE,
       // Illustrative. The real frame's list is published with the Symbo
       // release that carries each feature.
-      capabilities: ['dial', 'session', 'inbound', 'audioDevices', 'signIn', 'signOut', 'concurrentCalls', 'reload'],
+      capabilities: ['dial', 'session', 'inbound', 'audioDevices', 'signIn', 'signOut', 'concurrentCalls', 'reload', 'mute', 'dtmf'],
       deviceReady,
       powerDialing: true,
       concurrentCalls: concurrentCalls(),
@@ -323,6 +344,7 @@
           number: call.number,
         }
       : null,
+    muted,
     incoming: incoming
       ? {
           callId: incoming.callId,
@@ -333,6 +355,19 @@
       : null,
     warnings: [...warnings.keys()],
   })
+
+  // Every change reaches the page, whoever made it.
+  const setMuted = (next) => {
+    if (muted === next) return
+    muted = next
+    post('symbo:call.muteChanged', { muted })
+    render()
+  }
+
+  const dropSessionLine = () => {
+    sessionLine = false
+    setMuted(false)
+  }
 
   const queueUpdated = () =>
     post('symbo:session.queue.updated', {
@@ -358,6 +393,7 @@
   }
 
   const startSession = (dialSessionId, lines) => {
+    sessionLine = true
     session = {
       dialSessionId,
       lines,
@@ -386,6 +422,7 @@
   // Dial on. A queue that has run out is announced by noMoreCalls alone: the
   // engine never resumed.
   const resumeDialing = () => {
+    sessionLine = true
     if (session.queue.some((r) => r.status === 'queued')) {
       post('symbo:session.resumed', { dialSessionId: session.dialSessionId })
     }
@@ -503,6 +540,7 @@
     post('symbo:session.ended', payload)
     session = null
     cancelTimers()
+    dropSessionLine()
     render()
     scheduleInbound(INBOUND_AFTER_IDLE_MS)
   }
@@ -557,6 +595,7 @@
       durationSeconds,
       outcomeRequired: true,
     })
+    setMuted(false)
     render()
 
     // And that is the end of it. A one-off or inbound call has no outcome
@@ -710,15 +749,18 @@
 
     'symbo:hangUp'(msg) {
       if (session) {
+        // The rep hanging up drops the rep's own line with the call.
         if (sessionConnected()) {
           ok(msg)
           hangUpConnectedLeg('completed')
+          dropSessionLine()
           return
         }
         const ringing = sessionRinging()
         if (ringing.length) {
           ok(msg)
           ringing.forEach((leg) => endLeg(leg, 'cancelled', 'cancelled'))
+          dropSessionLine()
           session.status = 'paused'
           post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'requested' })
           queueUpdated()
@@ -734,6 +776,47 @@
 
     'symbo:setContact'(msg) {
       ok(msg)
+    },
+
+    // The answer goes out before the event, as the real frame sends them.
+    'symbo:setMuted'(msg) {
+      if (typeof msg.payload.muted !== 'boolean') {
+        return refuse(msg, 'INVALID_MUTED', 'setMuted needs { muted: true } or { muted: false }.')
+      }
+      if (!lineUp()) return refuse(msg, 'NO_ACTIVE_CALL', 'There is no active call.')
+      const next = msg.payload.muted
+      ok(msg, { muted: next })
+      setMuted(next)
+    },
+
+    // Played one at a time after any digits still waiting, each only while
+    // the conversation they were sent to is still up, and answered once the
+    // last has played. Plain timers rather than later(): ending the session
+    // cancels those, and this still owes the page an answer.
+    'symbo:sendDigits'(msg) {
+      const digits = typeof msg.payload.digits === 'string' ? msg.payload.digits : ''
+      if (!DTMF_DIGITS.test(digits)) {
+        return refuse(msg, 'INVALID_DIGITS', 'digits must be 1 to 32 of 0-9, * and #.')
+      }
+      const to = conversation()
+      if (!to) {
+        return refuse(msg, 'NO_ACTIVE_CALL', lineUp() ? 'Nobody has answered to hear the digits.' : 'There is no active call.')
+      }
+      const first = Math.max(Date.now(), keypadFreeAt)
+      keypadFreeAt = first + DTMF_GAP_MS * digits.length
+      let played = 0
+      let stopped = false
+      ;[...digits].forEach((digit, i) =>
+        setTimeout(() => {
+          if (stopped) return
+          if (conversation() !== to) {
+            stopped = true
+            return refuse(msg, 'NO_ACTIVE_CALL', `The call ended after ${played} of ${digits.length} digits.`)
+          }
+          played += 1
+          if (played === digits.length) ok(msg, { digits })
+        }, first + DTMF_GAP_MS * i - Date.now())
+      )
     },
 
     'symbo:answerIncoming'(msg) {
@@ -819,6 +902,7 @@
       // outcome. A connected call is never cut by a pause.
       const ringing = sessionRinging()
       ringing.forEach((leg) => endLeg(leg, 'cancelled', 'cancelled'))
+      if (!sessionConnected()) dropSessionLine()
       if (session.status !== 'paused' || ringing.length) {
         session.status = 'paused'
         post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'requested' })
@@ -862,6 +946,7 @@
       // Skipped before hang-up, so no outcome is asked for and the engine
       // does not stamp the cancelled default on it.
       endLeg(connected, 'cancelled', 'cancelled')
+      dropSessionLine()
       queueUpdated()
       render()
     },
@@ -1001,6 +1086,7 @@
     else if (connected) state = `on call · ${PROSPECTS[connected.prospectId].fullName}`
     else if (session?.status === 'dialing') state = `dialing ${sessionRinging().length} contact(s)…`
     else if (session) state = 'session paused'
+    if (muted) state += ' · muted'
     if (warnings.has('REALTIME_DISCONNECTED')) state += ' · realtime down'
 
     el('who').textContent = signedIn ? USER.name : 'Stub dialer'

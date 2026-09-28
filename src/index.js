@@ -45,6 +45,8 @@ export const COMMANDS = Object.freeze({
   IGNORE_INCOMING: 'symbo:ignoreIncoming',
   LIST_AUDIO_DEVICES: 'symbo:listAudioDevices',
   SET_AUDIO_DEVICES: 'symbo:setAudioDevices',
+  SET_MUTED: 'symbo:setMuted',
+  SEND_DIGITS: 'symbo:sendDigits',
   SESSION_START: 'symbo:session.start',
   SESSION_PAUSE: 'symbo:session.pause',
   SESSION_RESUME: 'symbo:session.resume',
@@ -76,6 +78,7 @@ export const EVENTS = Object.freeze({
   CALL_ENDED: 'symbo:call.ended',
   CALL_POST_CALL: 'symbo:call.postCall',
   CALL_COMPLETED: 'symbo:call.completed',
+  CALL_MUTE_CHANGED: 'symbo:call.muteChanged',
   CONTACT_MATCHED: 'symbo:contact.matched',
   AUDIO_DEVICES_CHANGED: 'symbo:audio.devicesChanged',
   SESSION_STARTED: 'symbo:session.started',
@@ -146,6 +149,9 @@ export const ERRORS = Object.freeze({
   QUEUED_CALL_DIALING: 'QUEUED_CALL_DIALING',
   CONCURRENT_CALLS_LOCKED: 'CONCURRENT_CALLS_LOCKED',
   INVALID_CONCURRENT_CALLS: 'INVALID_CONCURRENT_CALLS',
+  // Mute and keypad.
+  INVALID_MUTED: 'INVALID_MUTED',
+  INVALID_DIGITS: 'INVALID_DIGITS',
 })
 
 // Codes the `warning` event carries. Each is cleared by a `warning.cleared`
@@ -204,6 +210,14 @@ const isConcurrentCalls = (value) =>
   value >= MIN_CONCURRENT_CALLS &&
   value <= MAX_CONCURRENT_CALLS
 const CONCURRENT_CALLS_RULE = `a whole number of lines from ${MIN_CONCURRENT_CALLS} to ${MAX_CONCURRENT_CALLS}`
+
+// Keypad digits one sendDigits may carry: 0-9, * and #, up to 32 of them.
+const DTMF_DIGITS = /^[0-9*#]{1,32}$/
+
+// The frame plays digits one at a time, this far apart, and answers once the
+// last has played. Keep equal to the frame's DTMF_GAP_MS (symbo-ui
+// EmbedBridge.js).
+const DTMF_GAP_MS = 200
 
 // How long to wait for an answer before giving up. Only reachable if Symbo
 // fails to reply at all; a refusal comes back fast.
@@ -319,6 +333,11 @@ class SymboDialerClient {
     this.updateAvailable = false
     this.deviceReady = false
     this.powerDialing = false
+    // Whether the rep's microphone is muted on the call they are on. Follows
+    // call.muteChanged, and the answers to setMuted() and getState().
+    this.muted = false
+    // Digits sent and not yet answered for, which the frame plays in order.
+    this.pendingDigits = 0
     // Set when reload() was answered, so the load that follows is reported
     // as asked for.
     this.reloadRequested = false
@@ -722,6 +741,9 @@ class SymboDialerClient {
       case 'update.available':
         this.updateAvailable = true
         break
+      case 'call.muteChanged':
+        if (typeof payload.muted === 'boolean') this.muted = payload.muted
+        break
       case 'session.ended':
         // With no session running, the count is what a new one gets when
         // nobody sets it: the lock, which it already holds, or one line.
@@ -853,7 +875,10 @@ class SymboDialerClient {
   }
 
   getState() {
-    return this.send(COMMANDS.GET_STATE)
+    return this.send(COMMANDS.GET_STATE).then((state) => {
+      if (typeof state?.muted === 'boolean') this.muted = state.muted
+      return state
+    })
   }
 
   answerIncoming() {
@@ -862,6 +887,64 @@ class SymboDialerClient {
 
   ignoreIncoming() {
     return this.send(COMMANDS.IGNORE_INCOMING)
+  }
+
+  /**
+   * Mute (`true`) or unmute (`false`) the rep's microphone on the call they
+   * are on. Resolves with `{ muted }`; `call.muteChanged` follows when that
+   * changed anything. Mute lasts as long as the rep's line, as in Symbo: in a
+   * power-dial session that line can outlast a conversation, and drops when
+   * the rep hangs up or pauses. Refused with
+   * NO_ACTIVE_CALL while the rep's line is down. Check `hasCapability('mute')`
+   * against an older Symbo release, which answers UNKNOWN_COMMAND.
+   */
+  setMuted(arg) {
+    const muted = arg && typeof arg === 'object' ? arg.muted : arg
+    if (typeof muted !== 'boolean') {
+      return Promise.reject(invalid('setMuted needs true or false.'))
+    }
+    return this.send(COMMANDS.SET_MUTED, { muted }).then((result) => {
+      if (typeof result?.muted === 'boolean') this.muted = result.muted
+      return result
+    })
+  }
+
+  /**
+   * Press keypad digits on the call, for a phone menu or an extension: a
+   * string of 0-9, * and #, up to 32 at a time. They go to whoever answered:
+   * the call, or a session's connected contact. The frame plays them one by
+   * one, 200 ms apart, and a second call waits for the first. Resolves with
+   * `{ digits }` once the last has played. Refused with NO_ACTIVE_CALL while
+   * nobody has answered, and when that conversation ends part-way; the
+   * message says how many were played. On a Symbo call `*` is also the hold
+   * key (see the README). Check `hasCapability('dtmf')` against an older
+   * Symbo release, which answers UNKNOWN_COMMAND.
+   */
+  sendDigits(arg) {
+    const digits = arg && typeof arg === 'object' ? arg.digits : arg
+    if (typeof digits !== 'string' || !DTMF_DIGITS.test(digits)) {
+      return Promise.reject(
+        invalid('sendDigits needs 1 to 32 keypad digits: 0-9, * and #.')
+      )
+    }
+    // The answer comes after every digit already waiting has played, then
+    // these. Budget for all of them, so a long string, or presses faster than
+    // the frame plays them, does not time out while it is still playing.
+    this.pendingDigits += digits.length
+    const timeoutMs = this.commandTimeoutMs + DTMF_GAP_MS * this.pendingDigits
+    const settled = () => {
+      this.pendingDigits -= digits.length
+    }
+    return this.send(COMMANDS.SEND_DIGITS, { digits }, { timeoutMs }).then(
+      (result) => {
+        settled()
+        return result
+      },
+      (err) => {
+        settled()
+        throw err
+      }
+    )
   }
 
   /**
@@ -955,6 +1038,12 @@ class SymboDialerClient {
     this.concurrentCallsLocked = false
     this.updateAvailable = false
     this.deviceReady = false
+    // The reload dropped the rep's line, and with it any mute. Said, so a
+    // mute button drawn from call.muteChanged does not stay pressed.
+    if (this.muted) {
+      this.muted = false
+      this.emit('call.muteChanged', { muted: false })
+    }
     for (const code of [...this.warnings.keys()]) {
       this.warnings.delete(code)
       this.emit('warning.cleared', { code })
@@ -1036,6 +1125,7 @@ class SymboDialerClient {
     this.destroyed = true
     this.ready = false
     this.contacted = false
+    this.muted = false
     this.iframe = null
     this.listeners.clear()
   }

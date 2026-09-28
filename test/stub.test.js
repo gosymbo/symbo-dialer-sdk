@@ -447,6 +447,102 @@ describe('the offline stub, driven through the SDK', () => {
     expect(seen[3][1].prospect).toEqual({ id: 'p-1001', fullName: 'Jane Doe' })
   })
 
+  it('mutes and plays keypad digits on the call that is up, and unmutes when it ends', async () => {
+    const { dialer, mounting } = await mountOnStub()
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    expect(dialer.hasCapability('mute')).toBe(true)
+    expect(dialer.hasCapability('dtmf')).toBe(true)
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+
+    await expect(dialer.setMuted(true)).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+    await expect(dialer.sendDigits('1')).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+
+    await dialer.dial({ prospectId: 'p-1004' })
+    await vi.advanceTimersByTimeAsync(2000)
+    seen.length = 0
+
+    expect(await dialer.setMuted(true)).toEqual({ muted: true })
+    expect(dialer.muted).toBe(true)
+    // Already muted: answered, and no event, since nothing changed.
+    expect(await dialer.setMuted(true)).toEqual({ muted: true })
+    expect(seen).toEqual([['call.muteChanged', { muted: true }]])
+    expect((await dialer.getState()).muted).toBe(true)
+
+    // Played 200 ms apart, the second call after the first.
+    const menu = dialer.sendDigits('12#')
+    const extension = dialer.sendDigits('4')
+    const answered = vi.fn()
+    menu.then(answered)
+    extension.then(answered)
+    await vi.advanceTimersByTimeAsync(399)
+    expect(answered).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(answered).toHaveBeenLastCalledWith({ digits: '12#' })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(answered).toHaveBeenLastCalledWith({ digits: '4' })
+
+    seen.length = 0
+    await dialer.hangUp()
+    expect(seen.map(([n]) => n)).toEqual(['call.ended', 'call.postCall', 'call.muteChanged'])
+    expect(seen[2][1]).toEqual({ muted: false })
+    expect(dialer.muted).toBe(false)
+  })
+
+  it("keeps mute for as long as the rep's line in a session, and sends digits only to whoever answered", async () => {
+    const { dialer, mounting } = await mountOnStub()
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    const seen = []
+    dialer.on('call.muteChanged', (payload) => seen.push(payload))
+
+    // Muted while the first round rings: nobody has answered to hear digits.
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await dialer.setMuted(true)
+    await expect(dialer.sendDigits('1')).rejects.toMatchObject({
+      code: 'NO_ACTIVE_CALL',
+      message: 'Nobody has answered to hear the digits.',
+    })
+
+    // q-2 connects: still muted, and the keypad reaches it.
+    await vi.advanceTimersByTimeAsync(2100)
+    expect((await dialer.getState()).muted).toBe(true)
+    const pressing = dialer.sendDigits('12')
+    await vi.advanceTimersByTimeAsync(200)
+    expect(await pressing).toEqual({ digits: '12' })
+
+    // The contact hangs up part-way through a string: the rest are dropped.
+    // The rep's line stays up, and so does mute.
+    await vi.advanceTimersByTimeAsync(5400)
+    const late = dialer.sendDigits('3456')
+    late.catch(() => {})
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(late).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL', message: 'The call ended after 2 of 4 digits.' })
+    expect((await dialer.getState()).muted).toBe(true)
+    expect(seen).toEqual([{ muted: true }])
+
+    // Saved and dialing on, still muted; the rep hanging up the next contact
+    // drops the rep's line and the mute with it.
+    await dialer.session.saveOutcome({ outcomeId: 'o-connected', then: 'resume' })
+    await vi.advanceTimersByTimeAsync(3000)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(dialer.muted).toBe(true)
+    await dialer.hangUp()
+    expect(seen).toEqual([{ muted: true }, { muted: false }])
+    await expect(dialer.setMuted(true)).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+
+    // That was the last contact. A new session brings the line back,
+    // unmuted, and pausing it while lines ring drops it again.
+    await dialer.session.saveOutcome({ outcomeId: 'o-connected', then: 'end' })
+    await dialer.session.start({ dialSessionId: 'ds-demo-2' })
+    expect(dialer.muted).toBe(false)
+    expect(await dialer.setMuted(true)).toEqual({ muted: true })
+    await dialer.session.pause()
+    expect(dialer.muted).toBe(false)
+    await expect(dialer.sendDigits('1')).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL', message: 'There is no active call.' })
+  })
+
   it('lists and switches audio devices, and raises warnings the page can act on', async () => {
     const { dialer, stub, mounting } = await mountOnStub()
     await mounting

@@ -48,7 +48,7 @@ await dialer.session.start({ dialSessionId }) // a session your server created
 Not using a bundler? A script tag gives you the same thing on `window`:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.2/dist/symbo-dialer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.3/dist/symbo-dialer.min.js"></script>
 <script>
   const dialer = SymboDialer.create({ container: document.getElementById('symbo-dialer') })
   dialer.mount()
@@ -57,9 +57,9 @@ Not using a bundler? A script tag gives you the same thing on `window`:
 
 > **Which Symbo release you need** is at the [end](#sdk-versions-and-symbo-releases).
 > The session, inbound, audio and sign-in commands in 0.2.0 need the Symbo
-> release that carries the power-dial embed; against an earlier one they
-> reject with `UNKNOWN_COMMAND`, and `dialer.capabilities` tells you before you
-> try.
+> release that carries the power-dial embed, and mute and the keypad in 0.3.0
+> the one that carries those; against an earlier one they reject with
+> `UNKNOWN_COMMAND`, and `dialer.capabilities` tells you before you try.
 
 ## Contents
 
@@ -71,6 +71,7 @@ Not using a bundler? A script tag gives you the same thing on `window`:
 - [The dialer widget](#the-dialer-widget)
 - [The power dialer](#the-power-dialer)
 - [Audio devices](#audio-devices)
+- [Mute and keypad](#mute-and-keypad)
 - [Warnings](#warnings)
 - [New Symbo versions and reloads](#new-symbo-versions-and-reloads)
 - [API](#api)
@@ -91,7 +92,7 @@ Not using a bundler? A script tag gives you the same thing on `window`:
 | Inbound calls | The frame rings and answers | Your page rings and answers (`call.incoming`) |
 | Server side | None required | Sync contacts, create sessions, edit the queue, read calls back — the **Embedded Dialer** guide in the Symbo API docs |
 | Mount with | `mode: 'widget'` (the default) | `mode: 'compact'` or `'hidden'` |
-| SDK surface | `mount`, `dial`, `hangUp`, `setContact`, the `call.*` events | All of that, plus `session.*`, `signIn`, `answerIncoming`, `audio.*`, `getState`, the `session.*` events |
+| SDK surface | `mount`, `dial`, `hangUp`, `setContact`, the `call.*` events | All of that, plus `session.*`, `signIn`, `answerIncoming`, `audio.*`, `setMuted`, `sendDigits`, `getState`, the `session.*` events |
 | Example | [`example/index.html`](example/index.html) | [`example/collections.html`](example/collections.html) and [`example/power-dial.html`](example/power-dial.html) |
 
 Pick the **widget** when your application only needs a way to place a call and
@@ -206,7 +207,8 @@ differ only in what the frame renders.
 | Sign-in | Symbo's login form, inside the frame | A **Sign in** button in the strip opens Symbo's login tab | Your button calls `dialer.openSignIn()`, or your server signs a token for `dialer.signIn({ token, profileId })` |
 | Device / mic / realtime state | Shown in the dialer, and sent as events | Shown in the strip, and sent as events | Sent as events only: `ready`, `auth.required`, `warning`, `warning.cleared`, `device.*`, `permission.denied` |
 | Audio settings | The dialer's settings tab, and `dialer.audio.*` | The strip's panel, and `dialer.audio.*` | `dialer.audio.*` only |
-| Outcome form, notes, keypad | Symbo's | Yours | Yours |
+| Outcome form, notes | Symbo's | Yours | Yours |
+| Mute, keypad | Symbo's buttons, and `setMuted()` / `sendDigits()` | Yours, calling `setMuted()` / `sendDigits()` | Yours, calling `setMuted()` / `sendDigits()` |
 | Inbound ringtone | The frame rings | Silent — play your own on `call.incoming` | Silent — play your own on `call.incoming` |
 | Toasts | Symbo's, inside the frame | None — the same states arrive as `warning` | None |
 
@@ -629,7 +631,7 @@ the same write done from the page in one step.
 | `session.end({ force })` | Ends the session. Refused with `CALL_IN_PROGRESS` over a connected call unless `force: true`; the call survives either way. Resolves with `{ counts }` |
 | `session.getQueue()` | `{ dialSessionId, counts, queue: [{ queuedCallId, prospectId, prospectName, number, status, order, attempts, lastCallId, lastOutcomeId }] }` |
 | `session.setConcurrentCalls(n)` | Rings `n` lines, 1 to 4, from the next round; lines already ringing are neither hung up nor added to. Sends `session.concurrentCallsChanged` when the number changes; asking for the current number just resolves. Refused with `CONCURRENT_CALLS_LOCKED` when your organization locks a different number (`dialer.concurrentCallsLocked`). Check `dialer.hasCapability('concurrentCalls')` first |
-| `getState()` | Everything at once: `{ signedIn, deviceReady, mode, powerDialing, concurrentCalls, concurrentCallsLocked, updateAvailable, session, call, incoming, warnings }` |
+| `getState()` | Everything at once: `{ signedIn, deviceReady, mode, powerDialing, concurrentCalls, concurrentCallsLocked, updateAvailable, session, call, muted, incoming, warnings }` |
 
 Things the engine decides on its own, and that you should expect: it retries
 an unanswered contact on the retry schedule, and rotates
@@ -674,6 +676,51 @@ granted; before that the lists are empty or unnamed, and `audio.list()` can
 be refused with `DEVICE_NOT_READY`. The rep's choice persists inside Symbo, so
 it matches what Symbo's own UI shows in widget and compact mode, and survives
 reloads.
+
+## Mute and keypad
+
+In compact and hidden mode the mute button and the keypad are yours to draw.
+Widget mode has Symbo's own, and these commands work alongside them.
+
+```js
+muteButton.onclick = () => dialer.setMuted(!dialer.muted) // → { muted }
+dialer.on('call.muteChanged', ({ muted }) => renderMuteButton(muted))
+
+keypad.onclick = (e) => {
+  const key = e.target.closest('button[data-digit]') // '0'-'9', '*' or '#'
+  if (key) dialer.sendDigits(key.dataset.digit)
+}
+await dialer.sendDigits('4471#') // an extension or a menu choice, up to 32 at a time → { digits }
+```
+
+`setMuted()` mutes or unmutes the rep's microphone on their line to Symbo,
+and mute lasts as long as that line, as in Symbo itself. On a one-off or
+inbound call the line is the call. In a power-dial session it is the rep's own
+leg, which stays up while lines ring and can outlast a conversation, so mute
+can carry into the next one; it drops, taking mute with it, when the rep hangs
+up or pauses and when the session ends. `call.muteChanged` reports
+every change, whoever made it — this page, Symbo's own button in widget mode,
+the line dropping, or a frame reload — and `dialer.muted` follows it, so draw
+your button from the event rather than predicting it. Asking for the
+state the line is already in just resolves, with no event. With the rep's line
+down it is refused with `NO_ACTIVE_CALL`.
+
+`sendDigits()` plays the digits to whoever answered: the call, or the
+session's connected contact. They play one at a time, 200 ms apart, and it
+resolves once the last has played; a second `sendDigits()` waits for the
+first, so presses play in the order they were made. The rep hears the tones
+too. It is refused with `NO_ACTIVE_CALL` while nobody has answered, and when
+that conversation ends part-way; the message says how many digits had played,
+and the rest are dropped rather than played to whoever answers next.
+
+**`*` is also Symbo's hold key.** On a Symbo call, `*` from the rep puts the
+contact on hold, and `*` again takes them off; while the contact is on hold,
+`2` starts a transfer to the number keyed next, dialled on `#`. Symbo's own
+keypad behaves the same way, and no event reports the hold. Send `*` only when
+that is what you mean.
+
+Check `dialer.hasCapability('mute')` and `dialer.hasCapability('dtmf')` first:
+an older Symbo release answers `UNKNOWN_COMMAND`.
 
 ## Warnings
 
@@ -746,7 +793,9 @@ default `'widget'`), `mountTimeoutMs`
 (default 30 000), `commandTimeoutMs` (default 15 000). `commandTimeoutMs` does
 not apply to `dial()`, which always allows at least 25 s: the frame itself
 waits up to 15 s for the carrier to report the call ringing, and a shorter
-budget here would reject a call that has really been placed.
+budget here would reject a call that has really been placed. `sendDigits()`
+adds 200 ms to it for every digit waiting to play, its own and any sent
+before it.
 
 ### Commands
 
@@ -768,6 +817,8 @@ one of the [error codes](#error-codes) and whose `.message` says why.
 | `ignoreIncoming()` | `{}` |
 | `audio.list()` | `{ microphones, speakers, selected }` |
 | `audio.set({ microphoneId?, speakerId? })` | same as `audio.list()` |
+| `setMuted(muted \| { muted })` | `{ muted }`. See [Mute and keypad](#mute-and-keypad) |
+| `sendDigits(digits \| { digits })` | `{ digits }`, once the last digit has played |
 | `session.start({ dialSessionId, concurrentCalls? })` | `{ dialSessionId, concurrentCalls }` |
 | `session.pause()` / `session.resume()` / `session.skipCurrent()` | `{}` |
 | `session.end({ force? })` | `{ counts }` |
@@ -800,6 +851,10 @@ and `session.ended`.
 `dialer.concurrentCallsLocked` is true when your organization fixes that number
 for every session.
 
+`dialer.muted` is whether the rep's microphone is muted on their line to
+Symbo. It follows `call.muteChanged`, `setMuted()` and `getState()`, and is
+false while the line is down.
+
 ### Exports
 
 `SymboDialer`, `SymboDialerError`, `COMMANDS`, `EVENTS`, `ERRORS`, `WARNINGS`,
@@ -823,6 +878,7 @@ for every session.
 | `call.ended` | `{ callId, reason, durationSeconds }` |
 | `call.postCall` | `{ callId, prospectId, answered, durationSeconds, outcomeRequired }` |
 | `call.completed` | `{ callId, externalId, prospectId, outcomeId, outcome, disposition, dispositionGroup, note, durationSeconds }` — after a save made through `session.saveOutcome` succeeded. A one-off outcome, saved from your server, does not produce it |
+| `call.muteChanged` | `{ muted }` — the rep's microphone was muted or unmuted: through `setMuted()`, Symbo's own button in widget mode, or the rep's line dropping while muted (the call ending; in a session, the rep hanging up or pausing; a frame reload). See [Mute and keypad](#mute-and-keypad) |
 | `contact.matched` | `{ number, externalId, prospect: { id, fullName } }` |
 | `audio.devicesChanged` | same shape as `audio.list()` |
 | `session.started` | `{ dialSessionId, concurrentCalls, concurrentCallsLocked }` |
@@ -875,6 +931,7 @@ A refused command rejects with a `SymboDialerError` carrying one of these on
 | `OUTCOME_PENDING` | `session.resume` before the last call's outcome was saved |
 | `NO_CALL_TO_SAVE` / `OUTCOME_UNKNOWN` / `NOTE_REQUIRED` | `session.saveOutcome` problems: nothing waiting for an outcome, an unknown outcome, or an outcome that requires a note and got none |
 | `QUEUED_CALL_NOT_FOUND` / `QUEUED_CALL_DIALING` | `session.removeQueued` problems |
+| `INVALID_MUTED` / `INVALID_DIGITS` | `setMuted` was not given `true` or `false` / `sendDigits` was given something other than 1 to 32 of `0`-`9`, `*` and `#`. The SDK checks both before sending and refuses with `INVALID_OPTIONS`, so these only reach a page that posts the messages itself |
 | `UNKNOWN_COMMAND` | The Symbo release in front of you does not know this command yet |
 
 Raised by the SDK itself, before anything reached Symbo (exported as
@@ -926,14 +983,15 @@ be right in advance.
 | SDK | Needs the Symbo release with | Surface |
 | --- | --- | --- |
 | 0.1.x | the embedded dialer | `mount / dial({ number }) / hangUp / setContact`; `ready, auth.required, call.*, contact.matched, resize, error` |
-| **0.2.0** | the power-dial embed | everything above, plus `create()`, all three modes, `signIn / signOut / openSignIn`, `getState`, `dial({ prospectId })`, sessions and their number of lines, inbound, audio devices, warnings |
+| 0.2.0 | the power-dial embed | everything above, plus `create()`, all three modes, `signIn / signOut / openSignIn`, `getState`, `dial({ prospectId })`, sessions and their number of lines, inbound, audio devices, warnings |
+| **0.3.0** | mute and keypad in the embed | everything above, plus `setMuted / sendDigits`, `call.muteChanged`, `dialer.muted` |
 
-`PROTOCOL_VERSION` is `2` for both: every 0.2.0 change is additive, so a
-0.1.x integration keeps working against the newer release, and a 0.2.0
-integration against the older release keeps everything 0.1.x had. The new
-commands reject with `UNKNOWN_COMMAND` there, and `ready.capabilities` lists
-what the frame in front of you supports — check it before offering a session
-button.
+`PROTOCOL_VERSION` is `2` for all of them: every change since 0.1.x is
+additive, so an older integration keeps working against a newer release, and a
+newer integration against an older release keeps everything that release had.
+The commands it does not know reject with `UNKNOWN_COMMAND`, and
+`ready.capabilities` lists what the frame in front of you supports — check it
+before offering a session button, or a mute button.
 
 `PROTOCOL_VERSION` changes when a message is removed or renamed, or when a
 payload field changes meaning. This is a 0.x package and the surface can still
