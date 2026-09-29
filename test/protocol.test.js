@@ -56,6 +56,8 @@ const CONTRACT = Object.freeze({
     IGNORE_INCOMING: 'symbo:ignoreIncoming',
     LIST_AUDIO_DEVICES: 'symbo:listAudioDevices',
     SET_AUDIO_DEVICES: 'symbo:setAudioDevices',
+    SET_MUTED: 'symbo:setMuted',
+    SEND_DIGITS: 'symbo:sendDigits',
     SESSION_START: 'symbo:session.start',
     SESSION_PAUSE: 'symbo:session.pause',
     SESSION_RESUME: 'symbo:session.resume',
@@ -81,6 +83,7 @@ const CONTRACT = Object.freeze({
     CALL_ENDED: 'symbo:call.ended',
     CALL_POST_CALL: 'symbo:call.postCall',
     CALL_COMPLETED: 'symbo:call.completed',
+    CALL_MUTE_CHANGED: 'symbo:call.muteChanged',
     CONTACT_MATCHED: 'symbo:contact.matched',
     AUDIO_DEVICES_CHANGED: 'symbo:audio.devicesChanged',
     SESSION_STARTED: 'symbo:session.started',
@@ -146,6 +149,8 @@ const CONTRACT = Object.freeze({
     'QUEUED_CALL_DIALING',
     'CONCURRENT_CALLS_LOCKED',
     'INVALID_CONCURRENT_CALLS',
+    'INVALID_MUTED',
+    'INVALID_DIGITS',
   ],
   warnings: [
     'NOT_SIGNED_IN',
@@ -1557,6 +1562,121 @@ describe('session, inbound, audio and state API', () => {
     )
   })
 
+  it('setMuted and sendDigits', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+
+    await roundTrip(symbo, dialer.setMuted(true), COMMANDS.SET_MUTED, { muted: true }, { muted: true })
+    expect(dialer.muted).toBe(true)
+    await roundTrip(
+      symbo,
+      dialer.setMuted({ muted: false }),
+      COMMANDS.SET_MUTED,
+      { muted: false },
+      { muted: false }
+    )
+    expect(dialer.muted).toBe(false)
+
+    await roundTrip(symbo, dialer.sendDigits('1'), COMMANDS.SEND_DIGITS, { digits: '1' }, { digits: '1' })
+    await roundTrip(
+      symbo,
+      dialer.sendDigits({ digits: '0#*9' }),
+      COMMANDS.SEND_DIGITS,
+      { digits: '0#*9' },
+      { digits: '0#*9' }
+    )
+  })
+
+  it('refuses a malformed setMuted or sendDigits locally', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const before = symbo.posted().length
+
+    for (const bad of [undefined, 'true', 1, null, {}, { muted: 'yes' }]) {
+      await expect(dialer.setMuted(bad)).rejects.toMatchObject({
+        code: CLIENT_ERRORS.INVALID_OPTIONS,
+      })
+    }
+    for (const bad of [undefined, '', 123, '12a', '1 2', '+1', 'A', '1'.repeat(33), {}, { digits: 5 }]) {
+      await expect(dialer.sendDigits(bad)).rejects.toMatchObject({
+        code: CLIENT_ERRORS.INVALID_OPTIONS,
+      })
+    }
+
+    expect(symbo.posted().length).toBe(before)
+  })
+
+  it('follows mute through call.muteChanged, getState and the reload that forgets the frame', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const seen = []
+    // A handler reading the property already sees the new value.
+    dialer.on('call.muteChanged', (payload) => seen.push([payload, dialer.muted]))
+
+    symbo.event('symbo:call.muteChanged', { muted: true })
+    expect(seen).toEqual([[{ muted: true }, true]])
+
+    const state = dialer.getState()
+    symbo.answer(symbo.lastCommand().requestId, { signedIn: true, call: null, muted: false })
+    await state
+    expect(dialer.muted).toBe(false)
+
+    // A reload drops the rep's line: the unmute is announced, so a button
+    // drawn from the event does not stay pressed. Not muted, nothing to say.
+    symbo.event('symbo:call.muteChanged', { muted: true })
+    seen.length = 0
+    const reloading = dialer.reload()
+    symbo.answer(symbo.lastCommand().requestId, { reloading: true })
+    await reloading
+    expect(dialer.muted).toBe(false)
+    expect(seen).toEqual([[{ muted: false }, false]])
+    symbo.load()
+    expect(seen).toHaveLength(1)
+  })
+
+  it('surfaces a mute or keypad refusal as the rejection of the call that caused it', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+
+    const muting = dialer.setMuted(true)
+    symbo.refuse(symbo.lastCommand().requestId, ERRORS.NO_ACTIVE_CALL, 'There is no active call.')
+    await expect(muting).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+    expect(dialer.muted).toBe(false)
+
+    const pressing = dialer.sendDigits('1234')
+    symbo.refuse(
+      symbo.lastCommand().requestId,
+      ERRORS.NO_ACTIVE_CALL,
+      'The call ended after 2 of 4 digits.'
+    )
+    await expect(pressing).rejects.toMatchObject({
+      code: 'NO_ACTIVE_CALL',
+      message: 'The call ended after 2 of 4 digits.',
+    })
+  })
+
+  it('gives sendDigits time to play every digit waiting, not just the command budget', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer, { commandTimeoutMs: 2000 })
+    const settled = vi.fn()
+
+    // 32 digits, then 3 more queued behind them: the second answer can only
+    // come once all 35 have played, 200 ms apart.
+    dialer.sendDigits('1'.repeat(32)).catch(settled)
+    const second = dialer.sendDigits('123')
+    second.catch(settled)
+
+    await vi.advanceTimersByTimeAsync(2000 + 200 * 32 - 1)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(settled).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(200 * 3)
+    expect(settled).toHaveBeenCalledTimes(2)
+    expect(settled.mock.calls[1][0].code).toBe(CLIENT_ERRORS.COMMAND_TIMEOUT)
+
+    // Settled or timed out, they no longer count against the next one.
+    const next = dialer.sendDigits('9')
+    const [, , third] = symbo.commandsOf(COMMANDS.SEND_DIGITS)
+    symbo.answer(third.requestId, { digits: '9' })
+    expect(await next).toEqual({ digits: '9' })
+    expect(dialer.pendingDigits).toBe(0)
+  })
+
   it('delivers the per-leg session events, several legs at a time', async () => {
     const { dialer, symbo } = await readyDialer(env, SymboDialer)
     const seen = []
@@ -1660,6 +1780,7 @@ describe('session, inbound, audio and state API', () => {
       'call.ended',
       'call.postCall',
       'call.completed',
+      'call.muteChanged',
       'contact.matched',
       'permission.denied',
       'audio.devicesChanged',
@@ -1677,6 +1798,7 @@ describe('session, inbound, audio and state API', () => {
       'call.ended',
       'call.postCall',
       'call.completed',
+      'call.muteChanged',
       'contact.matched',
       'audio.devicesChanged',
       'error',

@@ -63,6 +63,10 @@
     .live { position: sticky; bottom: 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
     .live > div:first-child { margin-right: auto; }
     .timer { font-weight: 700; color: var(--live); font-variant-numeric: tabular-nums; }
+    .btn.on { background: #fdeaea; border-color: var(--live); color: var(--live); }
+    .keypad { display: grid; grid-template-columns: repeat(3, 36px); gap: 4px; }
+    .keypad .btn { padding: 4px 0; }
+    #keyed { min-width: 60px; font-variant-numeric: tabular-nums; letter-spacing: .1em; }
     #outcomes { width: 100%; }
     #log { max-height: 220px; overflow: auto; margin-top: 10px; font: 12px/1.6 ui-monospace, monospace; color: var(--muted); }
     #log b { color: var(--ink); }
@@ -108,6 +112,8 @@
         <button class="btn" id="resume" disabled>Resume</button>
         <button class="btn" id="skip" disabled>Skip current</button>
         <button class="btn" id="hangup" disabled>Hang up</button>
+        <!-- Mute lasts as long as the rep's line, which drops when the rep hangs up or pauses -->
+        <button class="btn" id="mute" disabled aria-pressed="false">Mute</button>
         <!-- Lines rung at once: a dropdown, or a lock when the organization fixes the number -->
         <span class="lines" id="lines" hidden>
           <span class="lock" id="linesLock" hidden>
@@ -139,6 +145,8 @@
         <div><b id="liveName"></b><br /><span class="muted" id="liveNumber"></span></div>
         <span class="timer" id="liveTimer"></span>
         <span class="pill" id="liveState"></span>
+        <div class="keypad" id="keypad" role="group" aria-label="Keypad" hidden></div>
+        <span class="muted" id="keyed"></span>
         <div class="row" id="outcomes" hidden></div>
         <p class="err" id="liveErr"></p>
       </section>
@@ -151,7 +159,7 @@
   </main>
 
   <!-- The SDK's own source, one directory up. With the published package, replace this with
-       <script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.2/dist/symbo-dialer.min.js"></script>
+       <script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.3/dist/symbo-dialer.min.js"></script>
        and pin the version you tested against. -->
   <script type="module">
     import { SymboDialer } from '../src/index.js'
@@ -240,6 +248,7 @@
       ui.disconnect.hidden = ui.signin.hidden = ui.update.hidden = true
       pill(ui.pill, 'offline')
       render()
+      showMute()
       refresh()
     }
 
@@ -322,6 +331,8 @@
       })
       d.on('session.leg.ended', legEnded)
       d.on('session.postCall', onPostCall)
+      // Whoever muted: this page, or the rep in Symbo. Also the unmute when the session ends.
+      d.on('call.muteChanged', showMute)
       d.on('call.completed', (p) => {
         const row = [...rows.values()].find((r) => r.callId === p.callId)
         if (row) update(row, { outcome: p.outcome?.name })
@@ -422,6 +433,7 @@
           activeSession = ui.sessionInput.value = session.dialSessionId
           ui.status.textContent = `${session.status || 'running'} · picked up from Symbo`
           showLines()
+          showMute() // getState() brought dialer.muted up to date
           showCounts(session.counts)
           for (const leg of session.legs || []) {
             update(leg, { live: true, state: leg.status })
@@ -478,7 +490,10 @@
       ui.liveName.textContent = p.prospectName || 'Contact'
       ui.liveNumber.textContent = p.number || ''
       pill(ui.liveState, 'connected', 'bad')
+      ui.keypad.hidden = !dialer.hasCapability('dtmf') // an older Symbo release has no keypad command
+      ui.keyed.textContent = ''
       ui.outcomes.hidden = true
+      refresh()
       ui.liveErr.textContent = ''
       ui.live.hidden = false
       const started = Date.now()
@@ -500,6 +515,8 @@
       ui.liveTimer.textContent = ''
       ui.liveNumber.textContent = `${p.answered ? 'answered' : 'not answered'} · ${p.durationSeconds || 0}s`
       pill(ui.liveState, 'outcome needed', 'warn')
+      ui.keypad.hidden = true
+      ui.keyed.textContent = ''
       ui.liveErr.textContent = outcomes.length ? '' : 'No outcomes loaded — add your API token and reconnect.'
       ui.outcomes.innerHTML = outcomes.map((o) => `<button class="btn" data-id="${esc(o.id)}">${esc(o.name)}</button>`).join('')
       ui.outcomes.hidden = ui.live.hidden = false
@@ -591,6 +608,25 @@
       }
     }
 
+    /* ── Mute and keypad ─────────────────────────────────────────────── */
+
+    function showMute() {
+      const muted = !!dialer?.muted
+      ui.mute.textContent = muted ? 'Unmute' : 'Mute'
+      ui.mute.classList.toggle('on', muted)
+      ui.mute.setAttribute('aria-pressed', String(muted))
+      refresh()
+    }
+
+    // Each press is its own sendDigits(): Symbo plays them in order, 200 ms apart.
+    ui.keypad.innerHTML = [...'123456789*0#'].map((d) => `<button class="btn" data-digit="${d}">${d}</button>`).join('')
+    ui.keypad.onclick = (event) => {
+      const digit = event.target.closest('button')?.dataset.digit
+      if (!digit) return
+      ui.keyed.textContent = (ui.keyed.textContent + digit).slice(-12)
+      dialer.sendDigits(digit).catch((error) => showError(ui.liveErr, error))
+    }
+
     /* ── Session controls ────────────────────────────────────────────── */
 
     const command = (button, run, errorEl = ui.controlErr) => {
@@ -622,6 +658,7 @@
       }))
     })
     command(ui.hangup, () => untilDropped(liveId, dialer.hangUp()))
+    command(ui.mute, () => dialer.setMuted(!dialer.muted)) // call.muteChanged redraws the button
     command(ui.end, async () => {
       if (!confirm('End this dial session? Symbo marks it completed.')) return
       ending = true
@@ -657,6 +694,10 @@
       enable(ui.connect, !dialer)
       enable(ui.start, dialer?.ready && ui.sessionInput.value.trim() && !activeSession)
       for (const button of [ui.skip, ui.hangup, ui.end]) enable(button, activeSession)
+      ui.mute.hidden = !!dialer?.ready && !dialer.hasCapability('mute') // an older Symbo release has no mute command
+      // Mute while talking to someone; unmute whenever muted. The rep's line can be down at other times
+      // (after Hang up or a pause), and Symbo would answer NO_ACTIVE_CALL.
+      enable(ui.mute, activeSession && dialer.hasCapability('mute') && ((liveId && !postCall) || dialer.muted))
       enable(ui.resume, activeSession && !postCall) // save the outcome first
     }
 
