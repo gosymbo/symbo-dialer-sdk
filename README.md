@@ -301,8 +301,15 @@ dialer.on('auth.required', async () => {
 ```
 
 Sessions last 8 hours. `auth.required` fires again at expiry; mint another
-token and call `signIn()` again. The frame reloads when it does, and `ready`
-follows.
+token and call `signIn()` again. The frame reloads to finish signing in, and
+`ready` follows from the reloaded frame.
+
+A frame that already holds the rep's session (after your page reloads, say)
+checks it and, once it holds, says `ready` by itself with no `auth.required`.
+A `signIn()` sent while it checks waits for the check; if the session holds,
+it answers `{ user }` with that rep, without signing in again or reloading.
+When `signIn()` does sign in, it answers `{ user, reloading: true }` and the
+frame reloads to finish.
 
 **Switching reps.** The rep signed in inside the frame is separate from your
 app's login. The frame keeps that rep signed in for up to 8 hours, even if a
@@ -763,7 +770,11 @@ signed in. Check `dialer.hasCapability('reload')` first.
 A frame can also reload without you asking: the browser discards a background
 tab, or the rep signs out of Symbo in another tab. Either way you get
 `frame.reloaded { requested }` before the new `ready` (or `auth.required`),
-and `dialer.ready` is `false` in between. Whatever the old frame held is gone:
+and `dialer.ready` is `false` in between. Commands still waiting for an answer
+reject with `FRAME_RELOADED` at once; the old frame may already have carried
+them out, so check before sending them again after `ready`. (A
+`signIn()` reloads the frame too, but that frame had not said `ready`, so no
+`frame.reloaded` is sent for it.) Whatever the old frame held is gone:
 
 - **A session running in it** is paused on Symbo's side. Call
   `session.start({ dialSessionId })` again to pick it up.
@@ -793,7 +804,9 @@ default `'widget'`), `mountTimeoutMs`
 (default 30 000), `commandTimeoutMs` (default 15 000). `commandTimeoutMs` does
 not apply to `dial()`, which always allows at least 25 s: the frame itself
 waits up to 15 s for the carrier to report the call ringing, and a shorter
-budget here would reject a call that has really been placed. `sendDigits()`
+budget here would reject a call that has really been placed. Nor does it
+apply to `signIn()`, which allows at least 25 s: the frame may first wait for
+the check of a session it already holds. `sendDigits()`
 adds 200 ms to it for every digit waiting to play, its own and any sent
 before it.
 
@@ -809,7 +822,7 @@ one of the [error codes](#error-codes) and whose `.message` says why.
 | `hangUp()` | `{}` |
 | `setContact({ … })` | `{}` |
 | `getState()` | the state object above |
-| `signIn({ token, profileId })` | `{ user }` |
+| `signIn({ token, profileId })` | `{ user }`, with `reloading: true` when it signed in and the frame reloads to finish |
 | `reload()` | `{ reloading }`. The frame then reloads, the rep still signed in: `frame.reloaded { requested: true }` and `ready` follow. Refused like `signOut()`. See [New Symbo versions and reloads](#new-symbo-versions-and-reloads) |
 | `signOut()` | `{ signedOut }`, false when nobody was signed in. The frame then reloads signed out and says `auth.required`. Refused with `SESSION_ACTIVE` / `CALL_IN_PROGRESS` / `POSTCALL_DETAILS_REQUIRED` while a session, a call (ringing or up) or its required outcome is pending |
 | `openSignIn()` | the opened `Window` (synchronous; throws `NO_LOGIN_URL` / `POPUP_BLOCKED`). Wait for `ready`, not for that window to close: under `Cross-Origin-Opener-Policy: same-origin` the handle is severed when the login page loads and starts reading `closed === true` |
@@ -866,7 +879,7 @@ false while the line is down.
 | --- | --- |
 | `ready` | `{ protocolVersion, user, organization, mode, capabilities, deviceReady, powerDialing, concurrentCalls, concurrentCallsLocked, updateAvailable }` |
 | `update.available` | `{}` — a newer Symbo version is ready; `dialer.reload()` picks it up |
-| `frame.reloaded` | `{ requested }` — sent by the SDK itself when a frame that had said `ready` loads again, before its new `ready`. `requested` is true after `reload()`. See [New Symbo versions and reloads](#new-symbo-versions-and-reloads) |
+| `frame.reloaded` | `{ requested }` — sent by the SDK itself when a frame that had said `ready` loads again, before its new `ready`. `requested` is true after `reload()`. Commands still waiting reject with `FRAME_RELOADED`. See [New Symbo versions and reloads](#new-symbo-versions-and-reloads) |
 | `auth.required` | `{ loginUrl }` — once per unauthenticated state; again if the session expires |
 | `device.ready` / `device.error` | `{}` / `{ code, message }` |
 | `permission.denied` | `{ permission: 'microphone' }` |
@@ -936,7 +949,8 @@ A refused command rejects with a `SymboDialerError` carrying one of these on
 
 Raised by the SDK itself, before anything reached Symbo (exported as
 `CLIENT_ERRORS`): `INVALID_OPTIONS`, `NOT_MOUNTED`, `NOT_READY`, `DESTROYED`,
-`MOUNT_TIMEOUT`, `COMMAND_TIMEOUT`, `NO_LOGIN_URL`, `POPUP_BLOCKED`.
+`MOUNT_TIMEOUT`, `COMMAND_TIMEOUT`, `NO_LOGIN_URL`, `POPUP_BLOCKED`,
+`FRAME_RELOADED` (the frame reloaded before answering).
 
 ## Hidden-mode checklist
 
@@ -984,7 +998,8 @@ be right in advance.
 | --- | --- | --- |
 | 0.1.x | the embedded dialer | `mount / dial({ number }) / hangUp / setContact`; `ready, auth.required, call.*, contact.matched, resize, error` |
 | 0.2.0 | the power-dial embed | everything above, plus `create()`, all three modes, `signIn / signOut / openSignIn`, `getState`, `dial({ prospectId })`, sessions and their number of lines, inbound, audio devices, warnings |
-| **0.3.0** | mute and keypad in the embed | everything above, plus `setMuted / sendDigits`, `call.muteChanged`, `dialer.muted` |
+| 0.3.0 | mute and keypad in the embed | everything above, plus `setMuted / sendDigits`, `call.muteChanged`, `dialer.muted` |
+| **0.3.1** | the same (hearing the reloaded frame afresh needs the Symbo release that answers `signIn()` with `reloading`) | everything above; commands waiting when a ready frame reloads reject with `FRAME_RELOADED` instead of timing out, and the frame a `signIn()` reloads into is heard afresh, once until the next `ready` |
 
 `PROTOCOL_VERSION` is `2` for all of them: every change since 0.1.x is
 additive, so an older integration keeps working against a newer release, and a

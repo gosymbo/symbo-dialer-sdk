@@ -31,11 +31,10 @@ const PROFILE_ID = 'profile-test-0001'
 // nobody noticed was renamed.
 //
 // So neither side is allowed to change quietly. This literal is duplicated in
-// symbo-ui (src/services/stateful/dialer/embed/protocol.js, pinned by
-// tests/services/stateful/dialer/embedContract.test.js). Editing the protocol
-// on either side fails that side's build until the literal is updated, and
-// updating the literal is the moment you are meant to remember the other
-// repository exists.
+// the Symbo application and pinned by a contract test there. Editing the
+// protocol on either side fails that side's build until the literal is
+// updated, and updating the literal is the moment you are meant to remember
+// the other repository exists.
 //
 // Adding an event or an optional payload field is additive and does not bump
 // PROTOCOL_VERSION. Removing a message, renaming one, or changing what a
@@ -848,6 +847,140 @@ describe('create and mount', () => {
     symbo.load() // the in-frame sign-in reloads the document
     symbo.ready()
     expect(reloaded).not.toHaveBeenCalled()
+    dialer.destroy()
+  })
+
+  it('rejects commands a reloading frame will never answer, at once rather than on the timeout', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const settled = vi.fn()
+    const starting = dialer.session.start({ dialSessionId: 'ds-1' })
+    starting.catch(settled)
+
+    // The frame reloads with session.start unanswered.
+    symbo.load()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(settled.mock.calls[0][0]).toMatchObject({ code: CLIENT_ERRORS.FRAME_RELOADED })
+    expect(dialer.pending.size).toBe(0)
+
+    // A late answer from the old document changes nothing.
+    const [sent] = symbo.commandsOf(COMMANDS.SESSION_START)
+    symbo.answer(sent.requestId, { dialSessionId: 'ds-1' })
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(settled).toHaveBeenCalledTimes(1)
+  })
+
+  it('hears the document a sign-in reloads into afresh, once per run of sign-ins that never reach ready', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
+    dialer.mount().catch(() => {})
+    const symbo = fakeSymbo(env, dialer)
+    const authRequired = vi.fn()
+    dialer.on('auth.required', authRequired)
+    const signIn = async (answer) => {
+      const signingIn = dialer.signIn({ token: 'abc123', profileId: PROFILE_ID })
+      const sent = symbo.commandsOf(COMMANDS.SIGN_IN).pop()
+      symbo.answer(sent.requestId, answer)
+      await signingIn
+    }
+
+    symbo.load()
+    symbo.authRequired()
+    expect(authRequired).toHaveBeenCalledTimes(1)
+
+    // The frame reloads to finish signing in. Not a frame reload to the page:
+    // it never said ready.
+    await signIn({ user: { id: 'u-1' }, reloading: true })
+    const reloaded = vi.fn()
+    dialer.on('frame.reloaded', reloaded)
+    symbo.load()
+    expect(reloaded).not.toHaveBeenCalled()
+
+    // Its session turned out unusable: the page hears it.
+    symbo.authRequired()
+    expect(authRequired).toHaveBeenCalledTimes(2)
+
+    // Signing in again, still without a ready: the same failure is not heard
+    // a third time, so a page that signs in on auth.required cannot loop.
+    await signIn({ user: { id: 'u-1' }, reloading: true })
+    symbo.load()
+    symbo.authRequired()
+    expect(authRequired).toHaveBeenCalledTimes(2)
+
+    // A ready ends the run.
+    symbo.ready()
+    symbo.authRequired()
+    expect(authRequired).toHaveBeenCalledTimes(3)
+    dialer.destroy()
+  })
+
+  it('keeps the dedupe when signIn did not reload the frame', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
+    dialer.mount().catch(() => {})
+    const symbo = fakeSymbo(env, dialer)
+    const authRequired = vi.fn()
+    dialer.on('auth.required', authRequired)
+    symbo.load()
+    symbo.authRequired()
+    // An older frame, or one that already held the rep: plain { user }.
+    const signingIn = dialer.signIn({ token: 'abc123', profileId: PROFILE_ID })
+    symbo.answer(symbo.commandsOf(COMMANDS.SIGN_IN)[0].requestId, { user: { id: 'u-1' } })
+    await signingIn
+    symbo.load()
+    symbo.authRequired()
+    expect(authRequired).toHaveBeenCalledTimes(1)
+    dialer.destroy()
+  })
+
+  it('does not reject commands on the first load, even when the frame said ready before it', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
+    const mounting = dialer.mount()
+    const symbo = fakeSymbo(env, dialer)
+    await vi.advanceTimersByTimeAsync(HELLO_RETRY_MS)
+    symbo.ready()
+    await mounting
+    const reloaded = vi.fn()
+    dialer.on('frame.reloaded', reloaded)
+    const dialing = dialer.dial({ number: '+15551234567' })
+    const [sent] = symbo.commandsOf(COMMANDS.DIAL)
+    const hellos = symbo.commandsOf(COMMANDS.HELLO).length
+    symbo.load() // the same document's own load event, arriving late
+    expect(dialer.ready).toBe(true)
+    expect(reloaded).not.toHaveBeenCalled()
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(hellos)
+    symbo.answer(sent.requestId, { callId: 'c-1' })
+    expect(await dialing).toEqual({ callId: 'c-1' })
+    dialer.destroy()
+  })
+
+  it('counts an answer to nothing as the frame being there: mount waits past its timer', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL, mountTimeoutMs: 5000 })
+    const mounting = dialer.mount()
+    const settled = vi.fn()
+    mounting.then(settled, settled)
+    const symbo = fakeSymbo(env, dialer)
+    symbo.load()
+    // The frame is checking a session it holds: heard, nothing more yet.
+    symbo.answer(null)
+    const hellos = symbo.commandsOf(COMMANDS.HELLO).length
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(settled).not.toHaveBeenCalled()
+    expect(symbo.commandsOf(COMMANDS.HELLO)).toHaveLength(hellos)
+    symbo.ready()
+    expect(await mounting).toBe(dialer)
+  })
+
+  it('gives signIn more than a short command timeout, since the frame may wait on a check first', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL, commandTimeoutMs: 2000 })
+    dialer.mount().catch(() => {})
+    const symbo = fakeSymbo(env, dialer)
+    symbo.load()
+    symbo.answer(null)
+    const settled = vi.fn()
+    dialer.signIn({ token: 'abc123', profileId: PROFILE_ID }).then(settled, settled)
+    await vi.advanceTimersByTimeAsync(24000)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(settled.mock.calls[0][0]).toMatchObject({ code: CLIENT_ERRORS.COMMAND_TIMEOUT })
     dialer.destroy()
   })
 
