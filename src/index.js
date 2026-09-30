@@ -178,6 +178,7 @@ export const CLIENT_ERRORS = Object.freeze({
   COMMAND_TIMEOUT: 'COMMAND_TIMEOUT',
   NO_LOGIN_URL: 'NO_LOGIN_URL',
   POPUP_BLOCKED: 'POPUP_BLOCKED',
+  FRAME_RELOADED: 'FRAME_RELOADED',
   UNKNOWN: 'UNKNOWN',
 })
 
@@ -215,8 +216,7 @@ const CONCURRENT_CALLS_RULE = `a whole number of lines from ${MIN_CONCURRENT_CAL
 const DTMF_DIGITS = /^[0-9*#]{1,32}$/
 
 // The frame plays digits one at a time, this far apart, and answers once the
-// last has played. Keep equal to the frame's DTMF_GAP_MS (symbo-ui
-// EmbedBridge.js).
+// last has played. Keep equal to the frame's own gap between digits.
 const DTMF_GAP_MS = 200
 
 // How long to wait for an answer before giving up. Only reachable if Symbo
@@ -230,9 +230,13 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 15000
 // 15 s budget here therefore expires first on any slow-ringing call: the
 // promise rejects with COMMAND_TIMEOUT, the frame's answer arrives to a
 // pending entry that is already gone, and the partner has a live call with no
-// callId. Keep this above the frame's CALL_ID_TIMEOUT_MS (symbo-ui
-// EmbedBridge.js); the two move together.
+// callId. Keep this above the frame's own wait for the call id; the two move
+// together.
 const DIAL_TIMEOUT_MS = 25000
+
+// signIn, likewise: the frame can hold it up to 8 s while it checks a session
+// it already has, then sign in.
+const SIGN_IN_TIMEOUT_MS = 25000
 
 // How long mount() waits for the frame to say anything. Cleared the moment
 // Symbo answers, with `ready` or with `auth.required` — a user taking their
@@ -341,6 +345,14 @@ class SymboDialerClient {
     // Set when reload() was answered, so the load that follows is reported
     // as asked for.
     this.reloadRequested = false
+    // Set when signIn() was answered { reloading: true }: the frame reloads to
+    // finish signing in. signInUnconfirmed lasts until the next ready, so a
+    // run of sign-ins that never take is heard afresh once, not every time.
+    this.signInReload = false
+    this.signInUnconfirmed = false
+    // Iframe load events seen. The first belongs to the document mount()
+    // created, which may already have answered.
+    this.frameLoads = 0
     this.warnings = new Map()
 
     this.handleMessage = this.handleMessage.bind(this)
@@ -586,6 +598,7 @@ class SymboDialerClient {
   onReady(payload) {
     this.ready = true
     this.authPending = false
+    this.signInUnconfirmed = false
     this.loginUrl = null
 
     this.user = payload.user ?? null
@@ -840,6 +853,14 @@ class SymboDialerClient {
     })
   }
 
+  rejectPending(err) {
+    this.pending.forEach(({ reject, timer }) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    this.pending.clear()
+  }
+
   flushAwaitingContact(err) {
     const waiting = this.awaitingContact
     this.awaitingContact = []
@@ -968,7 +989,15 @@ class SymboDialerClient {
     if (!options.profileId) {
       return Promise.reject(invalid('signIn needs the profileId Symbo issued you.'))
     }
-    return this.send(COMMANDS.SIGN_IN, { token: options.token, profileId: options.profileId })
+    return this.send(
+      COMMANDS.SIGN_IN,
+      { token: options.token, profileId: options.profileId },
+      { timeoutMs: Math.max(this.commandTimeoutMs, SIGN_IN_TIMEOUT_MS) }
+    ).then((result) => {
+      if (result?.reloading === true && !this.signInUnconfirmed)
+        this.signInReload = true
+      return result
+    })
   }
 
   /**
@@ -1015,13 +1044,31 @@ class SymboDialerClient {
   // it held: a session loaded in it, a call waiting for its outcome. Say so
   // before its new `ready`, then start the handshake again.
   onFrameLoad() {
-    if (this.ready || this.reloadRequested) {
+    this.frameLoads += 1
+    // The first load is the mounted document's own, even if it has already
+    // spoken: nothing was reloaded.
+    const ownLoad = this.frameLoads === 1 && !this.reloadRequested
+    if (!ownLoad && (this.ready || this.reloadRequested)) {
       const requested = this.reloadRequested
       this.reloadRequested = false
       if (this.ready) this.forgetFrame()
+      // The old document will never answer what it was asked.
+      this.rejectPending(
+        new SymboDialerError(
+          CLIENT_ERRORS.FRAME_RELOADED,
+          'The dialer reloaded before answering. Send it again after "ready".'
+        )
+      )
       this.emit('frame.reloaded', { requested })
     }
-    this.startSayingHello()
+    // The document a sign-in reloads into speaks for itself: if it says
+    // auth.required, that is news, not a repeat of the one before.
+    if (this.signInReload) {
+      this.signInReload = false
+      this.signInUnconfirmed = true
+      this.authPending = false
+    }
+    if (!ownLoad || !this.contacted) this.startSayingHello()
   }
 
   // The frame has signed the rep out and is reloading. Until the new document
@@ -1031,6 +1078,7 @@ class SymboDialerClient {
   forgetFrame() {
     this.ready = false
     this.authPending = false
+    this.signInUnconfirmed = false
     this.contacted = false
     this.user = null
     this.organization = null
@@ -1114,11 +1162,7 @@ class SymboDialerClient {
     // Anything still waiting on an answer never gets one now. Reject rather
     // than leave the caller's await hanging until the timeout.
     const err = destroyedError()
-    this.pending.forEach(({ reject, timer }) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    this.pending.clear()
+    this.rejectPending(err)
     this.flushAwaitingContact(err)
     this.rejectMount(err)
 
