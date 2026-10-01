@@ -1009,6 +1009,30 @@ describe('the offline stub, driven through the SDK', () => {
     expect(seen[0][1]).toMatchObject({ callId: second.callId, reason: 'cancelled' })
   })
 
+  it('asked to dial an empty queue, dismisses a ringing inbound call and says noMoreCalls before session.started', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
+    await dialer.session.removeQueued(['q-1', 'q-2', 'q-3', 'q-4', 'q-5', 'q-6'])
+    await dialer.session.hold()
+
+    stub.poke('stub:ringInbound')
+    const first = last('call.incoming')
+    seen.length = 0
+    expect((await dialer.session.start({ dialSessionId: 'ds-demo' })).dialing).toBe(false)
+    expect(names()).toEqual(['call.ended', 'session.noMoreCalls', 'session.started', 'session.queue.updated'])
+    expect(seen[0][1]).toEqual({ callId: first.callId, reason: 'cancelled', durationSeconds: 0 })
+    expect(seen[1][1]).toMatchObject({ dialSessionId: 'ds-demo', sessionOpen: true })
+    expect(seen[2][1]).toMatchObject({ dialSessionId: 'ds-demo', dialing: false })
+
+    // A resume does the same, and does not say session.resumed.
+    stub.poke('stub:ringInbound')
+    const second = last('call.incoming')
+    seen.length = 0
+    await dialer.session.resume()
+    expect(names()).toEqual(['call.ended', 'session.noMoreCalls'])
+    expect(seen[0][1]).toMatchObject({ callId: second.callId, reason: 'cancelled' })
+  })
+
   /* ------------------------------------------------------ one-off outcomes */
 
   it("saves a one-off call's outcome from the page: call.completed follows, and the call is done", async () => {
@@ -1320,6 +1344,24 @@ describe('the offline stub, driven through the SDK', () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(seen).toContain('frame.leaving')
     expect(stub.storage.has('symbo-stub:signedIn')).toBe(false)
+  })
+
+  it('does not reload for a plan change while a dial() is being placed', async () => {
+    const { dialer, stub, mounting } = await mountOnStub()
+    await mounting
+    const seen = []
+    dialer.on('*', (name) => seen.push(name))
+    const dialing = dialer.dial({ number: '+12125550123' })
+    stub.poke('stub:planChanged')
+    expect(seen).toContain('reload.required')
+    expect(seen).not.toContain('frame.leaving')
+
+    await vi.advanceTimersByTimeAsync(300)
+    await dialing
+    expect(seen).not.toContain('frame.leaving')
+    await dialer.hangUp()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(seen).toContain('frame.leaving')
   })
 
   it('carries out nothing once it has said frame.leaving for a plan change, but answers reload', async () => {

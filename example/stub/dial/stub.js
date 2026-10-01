@@ -410,13 +410,14 @@
   }
 
   // The rep's plan or seats changed: the frame has to reload, and does so by
-  // itself once nothing would be cut off. reload() from the page also works.
+  // itself once nothing would be cut off, a dial being placed included.
+  // reload() from the page also works.
   const requireReload = (reason) => {
     if (!signedIn || reloadRequired) return
     reloadRequired = reason
     post('symbo:reload.required', { reason })
     whenFree(
-      () => !!busyRefusal('reloading', { reloading: true }),
+      () => dialInFlight || !!busyRefusal('reloading', { reloading: true }),
       () => leave(reason, 1000)
     )
   }
@@ -600,14 +601,19 @@
     post('symbo:session.leg.ended', legView(leg))
   }
 
+  // Asked to dial, the engine dismisses an inbound call still ringing before
+  // it looks at the queue.
+  const dismissIncoming = () => {
+    if (!incoming) return
+    const dismissed = incoming
+    incoming = null
+    post('symbo:call.ended', { callId: dismissed.callId, reason: 'cancelled', durationSeconds: 0 })
+  }
+
   // What the engine does before it dials: an inbound call still ringing is
   // dismissed, and a one-off call's unsaved post-call step is dropped.
   const clearTheWayToDial = () => {
-    if (incoming) {
-      const dismissed = incoming
-      incoming = null
-      post('symbo:call.ended', { callId: dismissed.callId, reason: 'cancelled', durationSeconds: 0 })
-    }
+    dismissIncoming()
     clearPendingOneOff()
   }
 
@@ -633,11 +639,15 @@
         })),
     }
     if (resumable?.dialSessionId === dialSessionId) resumable = null
+    if (dial) dismissIncoming()
     const dialing = dial && session.queue.some((r) => r.status === 'queued')
     if (dialing) {
-      clearTheWayToDial()
+      clearPendingOneOff()
       sessionLine = true
       session.status = 'dialing'
+    } else if (dial) {
+      // An empty queue: session.noMoreCalls goes out before session.started.
+      dialNextRound()
     }
     post('symbo:session.started', {
       dialSessionId,
@@ -646,7 +656,7 @@
       dialing,
     })
     queueUpdated()
-    if (dial) dialNextRound()
+    if (dialing) dialNextRound()
     render()
     return dialing
   }
@@ -1326,6 +1336,7 @@
       // moves on once that call ends and its outcome is saved.
       if (sessionConnected()) return
       session.pausedByRequest = false
+      dismissIncoming()
       resumeDialing()
     },
 

@@ -297,7 +297,10 @@
 
       d.on('session.started', (p) => {
         activeSession = p.dialSessionId
-        ui.status.textContent = `dialing · ${linesText(p.concurrentCalls)}`
+        // dialing: false when the queue was already empty, which session.noMoreCalls has said, or when a call
+        // came up while the session loaded. An older Symbo leaves it out.
+        if (p.dialing !== false) ui.status.textContent = `dialing · ${linesText(p.concurrentCalls)}`
+        else if (ui.status.textContent !== 'queue empty') waitForResume()
         showLines()
         refresh()
         reconcile()

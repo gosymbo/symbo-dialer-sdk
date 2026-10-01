@@ -531,8 +531,8 @@ engine is dialing. One that arrives while it dials follows the rep's normal
 no-answer routing (voicemail, forwarding). One inbound call rings at a time,
 and `call.ended { reason: 'cancelled' }` arrives for every `call.incoming` that
 stops ringing unanswered: the caller gave up, it was ignored (by you or in
-Symbo), it rang out after 30 s, or `session.start()` or `session.resume()`
-started dialing over it.
+Symbo), it rang out after 30 s, or `session.start()` or `session.resume()` was
+asked to dial, even if the queue turned out to be empty.
 
 `answerIncoming()` takes the call when the rep's line is free. Over a one-off
 call it is refused with `CALL_IN_PROGRESS`, and over a session's call in front
@@ -842,6 +842,7 @@ only withdraws a warning you were sent, so one raised and withdrawn before
 | `SIGNED_OUT_ELSEWHERE` | The rep signed out of Symbo in another Symbo frame on your site while this one was busy. This frame signs out too once nothing would be cut off — no session loaded, no call up, ringing or being placed, no outcome still required under "Require & block dialer" (`frame.leaving { reason: 'signed_out_elsewhere' }`) — and its own token refreshes meanwhile do not call that off. Until then it keeps working: the other frame's sign-out does not usually end this frame's session with Symbo (if it did, Symbo refuses the frame's next request and it signs out at once, with `logout`). If the rep signs in again in another Symbo frame on your site first, this one stays signed in and the warning is cleared |
 | `MIC_PERMISSION_DENIED` | The microphone permission was denied. `permission.denied` fires at the same time |
 | `EMBED_NOT_ENABLED` | Embedding is not enabled for this organisation |
+| `ORIGIN_NOT_ALLOWED` | This page's origin is not on the list you gave Symbo; `mount()` rejects with it |
 | `POWER_DIALING_NOT_ENABLED` | This rep has no power-dialing seat |
 | `HIJACK_MODE` | The rep's calling is in an admin-controlled state |
 
@@ -891,9 +892,11 @@ The frame also reloads, or signs the rep out and reloads, by itself:
 
 `reload.required { reason }` (also `dialer.reloadRequired` and
 `getState().reloadRequired`) means the frame has to reload, and will as soon as
-no session is loaded and no call is up or ringing. Call `reload()` at a quiet
-moment yourself if you prefer. `frame.leaving { reason, inMs }` is the last
-word from the old document; `inMs` is how long until it goes.
+no session is loaded, no call is up, ringing or being placed, and, in widget
+mode, no call still needs its outcome under "Require & block dialer". Call
+`reload()` at a quiet moment yourself if you prefer.
+`frame.leaving { reason, inMs }` is the last word from the old document; `inMs`
+is how long until it goes.
 
 Asked for or not, you get `frame.reloaded { requested, reason }` before the new
 `ready` (or `auth.required`), and `dialer.ready` is `false` in between.
