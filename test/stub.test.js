@@ -396,7 +396,14 @@ describe('the offline stub, driven through the SDK', () => {
     seen.length = 0
     await dialer.ignoreIncoming()
     expect(seen.map(([n]) => n)).toEqual(['call.ended'])
-    expect(seen[0][1]).toMatchObject({ callId: incoming[1].callId, reason: 'ignored' })
+    expect(seen[0][1]).toMatchObject({ callId: incoming[1].callId, reason: 'cancelled' })
+
+    // One that rings out unanswered ends the same way.
+    stub.poke('stub:ringInbound')
+    const rangOut = seen.filter(([n]) => n === 'call.incoming').pop()[1]
+    seen.length = 0
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(seen).toEqual([['call.ended', { callId: rangOut.callId, reason: 'cancelled', durationSeconds: 0 }]])
 
     // The example page pokes the stub to ring again; answer this one.
     seen.length = 0
@@ -813,6 +820,45 @@ describe('the offline stub, driven through the SDK', () => {
     expect(names()).toEqual([])
   })
 
+  it('ends a one-off call taken over by endCurrent while a session call waits for its outcome', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    // Connected at 2 s; the contact hangs up 6 s later.
+    await vi.advanceTimersByTimeAsync(8100)
+    expect((await dialer.getState()).session.status).toBe('post_call')
+    stub.poke('stub:ringInbound')
+    const first = last('call.incoming')
+    await dialer.answerIncoming({ endCurrent: true })
+
+    stub.poke('stub:ringInbound')
+    const second = last('call.incoming')
+    seen.length = 0
+    expect(await dialer.answerIncoming({ endCurrent: true })).toEqual({ callId: second.callId })
+    expect(names()).toEqual(['call.ended', 'call.postCall', 'call.answered'])
+    expect(seen[0][1]).toMatchObject({ callId: first.callId, reason: 'hangup' })
+    expect(seen[1][1]).toMatchObject({ callId: first.callId })
+    const state = await dialer.getState()
+    expect(state.session.status).toBe('post_call')
+    expect(state.call).toMatchObject({ callId: second.callId, status: 'connected' })
+  })
+
+  it("leaves a one-off call's mute alone when a paused session is paused again or held", async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
+    const { callId } = await dialer.dial({ number: '+12125550123' })
+    await vi.advanceTimersByTimeAsync(2000)
+    await dialer.setMuted(true)
+
+    seen.length = 0
+    await dialer.session.pause()
+    await dialer.session.hold()
+    expect(names()).not.toContain('call.muteChanged')
+    expect(dialer.muted).toBe(true)
+    const state = await dialer.getState()
+    expect(state.muted).toBe(true)
+    expect(state.call).toMatchObject({ callId, status: 'connected' })
+  })
+
   it("pauses from the post-call step by dropping the rep's line; the call stays until it is saved", async () => {
     const { dialer, seen, names } = await readyOnStub()
     await dialer.session.start({ dialSessionId: 'ds-demo' })
@@ -1217,5 +1263,37 @@ describe('the offline stub, driven through the SDK', () => {
     dialer.iframe.dispatch('load')
     expect(last('frame.reloaded')).toEqual({ requested: false, reason: 'signed_out_elsewhere' })
     expect(last('auth.required')).toMatchObject({ reloadReason: 'signed_out_elsewhere' })
+  })
+
+  it('carries out nothing once it has said frame.leaving for a plan change, but answers reload', async () => {
+    const { dialer, stub, names, last } = await readyOnStub()
+    stub.poke('stub:planChanged')
+    expect(last('frame.leaving')).toEqual({ reason: 'plan_changed', inMs: 1000 })
+
+    await expect(dialer.dial({ number: '+12125550123' })).rejects.toMatchObject({
+      code: 'NOT_SIGNED_IN',
+      message: 'The frame is reloading.',
+    })
+    await expect(dialer.signOut()).rejects.toMatchObject({ code: 'NOT_SIGNED_IN' })
+    stub.poke('stub:ringInbound')
+    expect(names()).not.toContain('call.incoming')
+    expect(await dialer.reload()).toEqual({ reloading: true })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(stub.reloads).toHaveLength(1)
+  })
+
+  it('carries out nothing once it has said frame.leaving for a sign-out, but answers signOut', async () => {
+    const { dialer, stub, last } = await readyOnStub()
+    stub.poke('stub:signOut')
+    expect(last('frame.leaving')).toEqual({ reason: 'signed_out_elsewhere', inMs: 600 })
+
+    await expect(dialer.dial({ number: '+12125550123' })).rejects.toMatchObject({
+      code: 'NOT_SIGNED_IN',
+      message: 'The rep is being signed out.',
+    })
+    await expect(dialer.reload()).rejects.toMatchObject({ code: 'NOT_SIGNED_IN' })
+    expect(await dialer.signOut()).toEqual({ signedOut: true })
+    await vi.advanceTimersByTimeAsync(600)
+    expect(stub.reloads).toHaveLength(1)
   })
 })

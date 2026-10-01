@@ -529,9 +529,10 @@ The page is offered an inbound call whenever the rep could take it: between
 calls, during a one-off call, and during a power-dial session except while the
 engine is dialing. One that arrives while it dials follows the rep's normal
 no-answer routing (voicemail, forwarding). One inbound call rings at a time,
-and `call.ended` arrives for every `call.incoming` that stops ringing: the
-caller gave up (`missed`), you ignored it (`ignored`), or `session.start()` or
-`session.resume()` started dialing over it (`cancelled`).
+and `call.ended { reason: 'cancelled' }` arrives for every `call.incoming` that
+stops ringing unanswered: the caller gave up, it was ignored (by you or in
+Symbo), it rang out after 30 s, or `session.start()` or `session.resume()`
+started dialing over it.
 
 `answerIncoming()` takes the call when the rep's line is free. Over a one-off
 call it is refused with `CALL_IN_PROGRESS`, and over a session's call in front
@@ -603,7 +604,9 @@ const { dialSessionId, concurrentCalls } = await dialer.session.start({
 The frame takes the session off hold, joins the rep's audio leg, and the
 engine dials. From here on you render events. A `concurrentCalls` other than
 your organization's locked number is refused with `CONCURRENT_CALLS_LOCKED`
-before anything is dialed.
+before anything is dialed. The result and `session.started` carry
+`dialing: true`, or `dialing: false` when the queue was already empty, which
+`session.noMoreCalls` has said.
 
 Pass `dial: false` to load the session without dialing, as Symbo itself opens
 one on page load: it comes off hold and reads `paused`
@@ -712,7 +715,7 @@ your server makes with `PUT /calls/{id}` does not reach it, so
 | `session.saveOutcome({ …, then })` | Saves the outcome, note and call fields on the call, then `'resume'` (next round), `'pause'` or `'end'`. `'pause'` on a call that has ended closes it and drops the rep's line, as Symbo's Back does: `session.paused { reason: 'requested' }` follows and `getState()` reads `paused`. With a required call field still missing only the line drops, no event is sent and it keeps reading `post_call`; a save during the call keeps reading `connected`. If `end()` was asked for during the call, or an admin closed the session, a `'pause'` save completes that and `session.ended` arrives instead. `'resume'` is refused, before anything is saved, with `REALTIME_DISCONNECTED` while realtime is down and with `CALL_IN_PROGRESS` while another call is up |
 | `session.skipCurrent()` | Hangs up the connected call and skips its outcome |
 | `hangUp()` | Hangs up the connected call (→ `session.postCall`), or cancels ringing lines; during a one-off or inbound call, hangs that up |
-| `session.hold()` | Parks the session without ending it, as Symbo's Back → Hold does: ringing lines are hung up, the rep's line drops, a call waiting for its outcome is closed without one, and the session goes on `hold` with its queue kept. `session.held { dialSessionId, counts }` follows, and it resolves the same. `session.start({ dialSessionId })` picks it up again, its cancelled calls back on the queue. Refused with `CALL_IN_PROGRESS` while a call is connected. Check `dialer.hasCapability('sessionHold')` first |
+| `session.hold()` | Parks the session without ending it, as Symbo's Back → Hold does: ringing lines are hung up, the rep's line drops, a call waiting for its outcome is closed without one, and the session goes on `hold` with its queue kept. `session.held { dialSessionId, counts }` follows, and it resolves the same. `session.start({ dialSessionId })` picks it up again, its cancelled calls back on the queue. Refused with `CALL_IN_PROGRESS` while a call is connected. If `end()` was asked for during the call, or an admin closed the session, a hold in the post-call step completes that instead: `session.ended` arrives, not `session.held`, and it still resolves `{ dialSessionId, counts }`. Check `dialer.hasCapability('sessionHold')` first |
 | `session.removeQueued(queuedCallId \| [ids] \| { queuedCallIds })` | Drops queued contacts from this session; Symbo decides row by row, and leaves one being dialed alone. One id resolves `{}`, or is refused with `QUEUED_CALL_DIALING` while its line rings or is connected and `QUEUED_CALL_NOT_FOUND` when it is not on the session or already removed. A list of 1 to 1000 ids resolves `{ removed: [ids], skipped: [{ queuedCallId, reason: 'dialing' \| 'already_removed' \| 'not_found' }] }`; the SDK refuses it with `NOT_SUPPORTED` unless `dialer.hasCapability('removeQueuedCalls')` |
 | `session.end({ force, dialSessionId })` | Ends the session and drops the rep's line. Refused with `CALL_IN_PROGRESS` over a connected call unless `force: true`; the call survives either way. Resolves with `{ dialSessionId, counts }`. With the `dialSessionId` of a session that is not loaded here — one left on hold, or `ready.resumableSession` — it ends that one through Symbo's API instead, refused with `CALL_IN_PROGRESS` while a call on it is connected unless `force: true`, and sends no `session.ended`: session events describe the loaded session. An older Symbo release would end the loaded session, so the SDK refuses `dialSessionId` with `NOT_SUPPORTED` unless `dialer.hasCapability('sessionEndById')` |
 | `session.getQueue()` | `{ dialSessionId, counts, queue: [{ queuedCallId, prospectId, prospectName, number, status, order, attempts, lastCallId, lastOutcomeId }] }` |
@@ -1051,7 +1054,7 @@ only listed for a rep with power dialing.
 | `call.muteChanged` | `{ muted }` — the rep's microphone was muted or unmuted: through `setMuted()`, Symbo's own button in widget mode, or the rep's line dropping while muted (the call ending; in a session, the rep hanging up, pausing or holding, the queue running out, the session ending; a frame reload). See [Mute and keypad](#mute-and-keypad) |
 | `contact.matched` | `{ number, externalId, prospect: { id, fullName } }` |
 | `audio.devicesChanged` | same shape as `audio.list()` |
-| `session.started` | `{ dialSessionId, concurrentCalls, concurrentCallsLocked, dialing }` — `dialing` is false for `session.start({ dial: false })` |
+| `session.started` | `{ dialSessionId, concurrentCalls, concurrentCallsLocked, dialing }` — `dialing` is false for `session.start({ dial: false })`, and when the queue was already empty (`session.noMoreCalls` has said so) |
 | `session.paused` | `{ dialSessionId, reason: 'connected' \| 'requested' \| 'incoming' }` — `incoming` when `answerIncoming({ endCurrent: true })` dropped the session's line |
 | `session.resumed` | `{ dialSessionId }` — when the engine dials on. A resume that already knows the queue is empty sends `session.noMoreCalls` instead; one that finds it empty on the next fetch sends `session.noMoreCalls` right after |
 | `session.ended` / `session.held` | `{ dialSessionId, counts }` — the session ended / was parked with `session.hold()` |
@@ -1111,7 +1114,9 @@ Raised by the SDK itself, before anything reached Symbo (exported as
 `FRAME_RELOADED` (the frame reloaded before answering), `NOT_SUPPORTED` (an
 option the Symbo release in front of you would misread rather than refuse:
 `session.start({ dial: false })`, `session.end({ dialSessionId })` or a list
-for `session.removeQueued`; the message names the capability to check).
+for `session.removeQueued`; the message names the capability to check). For a
+rep without power dialing, whose frame advertises no `session`, these go to
+the frame and get its own answer, such as `POWER_DIALING_NOT_ENABLED`.
 
 ## Hidden-mode checklist
 

@@ -1290,9 +1290,10 @@ class SymboDialerClient {
 
   // For an option an older frame would misread rather than refuse: a
   // rejection when the ready frame lacks the capability, otherwise null.
-  // Before ready, send() answers NOT_READY instead.
+  // Before ready, send() answers NOT_READY instead. A frame without 'session'
+  // (a rep with no power dialing) answers every session command itself.
   unsupported(capability, what) {
-    return this.ready && !this.hasCapability(capability)
+    return this.ready && this.hasCapability('session') && !this.hasCapability(capability)
       ? Promise.reject(notSupported(what, capability))
       : null
   }

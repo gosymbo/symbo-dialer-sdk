@@ -131,6 +131,10 @@
   let dialInFlight = false
   // Set once the frame has asked to reload (reload.required).
   let reloadRequired = null
+  // 'reloading' or 'signingOut' once this document is on its way out. Like the
+  // real frame, it then sends nothing but answers, and refuses every command
+  // except the one already under way.
+  let leaving = null
   // Why the last document left, for the first ready or auth.required of this one.
   let reloadReason = localStorage.getItem(LEAVING_KEY)
   localStorage.removeItem(LEAVING_KEY)
@@ -235,6 +239,7 @@
   /* --------------------------------------------------------------- posting */
 
   const post = (type, payload = {}) =>
+    (!leaving || type === 'symbo:result') &&
     parent.postMessage({ type, payload, protocolVersion: V }, parentOrigin || '*')
 
   const ok = (msg, data = {}) =>
@@ -387,6 +392,7 @@
   // happens, and remembered for the next document's ready or auth.required.
   const leave = (reason, inMs) => {
     post('symbo:frame.leaving', { reason, inMs })
+    leaving = reason === 'plan_changed' ? 'reloading' : 'signingOut'
     localStorage.setItem(LEAVING_KEY, reason)
     cancelTimers()
     later(inMs, () => location.reload())
@@ -549,9 +555,10 @@
     render()
   }
 
+  // A one-off call placed while the session's line was down keeps its mute.
   const dropSessionLine = () => {
     sessionLine = false
-    setMuted(false)
+    if (!call) setMuted(false)
   }
 
   const queueUpdated = () =>
@@ -803,7 +810,7 @@
     later(INBOUND_RING_MS, () => {
       if (incoming !== ringing) return
       incoming = null
-      post('symbo:call.ended', { callId: ringing.callId, reason: 'missed', durationSeconds: 0 })
+      post('symbo:call.ended', { callId: ringing.callId, reason: 'cancelled', durationSeconds: 0 })
       render()
       scheduleInbound(INBOUND_REPEAT_MS)
     })
@@ -976,6 +983,7 @@
       // and reloads it signed out; the reloaded frame is the one that says
       // auth.required, and the reload restarts the SDK's hello loop. Asked
       // for, so no frame.leaving.
+      leaving = 'signingOut'
       localStorage.removeItem(STORAGE_KEY)
       signedIn = false
       cancelTimers()
@@ -990,6 +998,7 @@
       const busy = busyRefusal('reloading', { reloading: true })
       if (busy) return refuse(msg, ...busy)
       ok(msg, msg.payload.hard === true ? { reloading: true, hard: true } : { reloading: true })
+      leaving = 'reloading'
       cancelTimers()
       later(300, () => location.reload())
     },
@@ -1124,16 +1133,18 @@
         if (call) {
           return refuse(msg, 'CALL_IN_PROGRESS', 'A call is already active. Hang up, or answer with { endCurrent: true }.')
         }
-      } else if (sessionCall || (session && sessionLine)) {
-        const connected = sessionConnected()
-        if (connected) hangUpConnectedLeg('completed')
-        if (connected || sessionLine) {
-          dropSessionLine()
-          session.status = 'paused'
-          post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'incoming' })
+      } else {
+        if (sessionCall || (session && sessionLine)) {
+          const connected = sessionConnected()
+          if (connected) hangUpConnectedLeg('completed')
+          if (connected || sessionLine) {
+            dropSessionLine()
+            session.status = 'paused'
+            post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'incoming' })
+          }
         }
-      } else if (call) {
-        finishOneOffCall('hangup')
+        // Also with a session call in its post-call step and the line down.
+        if (call) finishOneOffCall('hangup')
       }
       // Answering drops a one-off call's unsaved post-call step, as in
       // Symbo; dialer.saveOutcome({ callId }) can still save it.
@@ -1162,7 +1173,7 @@
       const ignored = incoming
       incoming = null
       ok(msg)
-      post('symbo:call.ended', { callId: ignored.callId, reason: 'ignored', durationSeconds: 0 })
+      post('symbo:call.ended', { callId: ignored.callId, reason: 'cancelled', durationSeconds: 0 })
       render()
       scheduleInbound(INBOUND_REPEAT_MS)
     },
@@ -1503,6 +1514,13 @@
       parentOrigin = e.origin && e.origin !== 'null' ? e.origin : null
     }
     msg.payload = msg.payload && typeof msg.payload === 'object' ? msg.payload : {}
+
+    if (leaving) {
+      if (msg.type === 'symbo:hello') return
+      if (leaving === 'reloading' && msg.type === 'symbo:reload') return ok(msg, { reloading: true })
+      if (leaving === 'signingOut' && msg.type === 'symbo:signOut') return ok(msg, { signedOut: true })
+      return refuse(msg, 'NOT_SIGNED_IN', leaving === 'reloading' ? 'The frame is reloading.' : 'The rep is being signed out.')
+    }
 
     const handler = handlers[msg.type]
     if (!handler) return refuse(msg, 'UNKNOWN_COMMAND', `Unknown command ${msg.type}.`)

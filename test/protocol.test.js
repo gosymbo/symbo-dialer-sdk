@@ -2146,6 +2146,34 @@ describe('calls during a session, hold, one-off outcomes and reloads', () => {
     expect(symbo.posted().length).toBe(before)
   })
 
+  it('sends these options to a frame without sessions, which answers them itself', async () => {
+    // A rep without power dialing: the frame drops every session capability,
+    // so a missing one says nothing about the release.
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    symbo.ready({ capabilities: ['inbound', 'audioDevices', 'signIn'], powerDialing: false })
+
+    const start = dialer.session.start({ dialSessionId: 'ds-1', dial: false })
+    let sent = symbo.lastCommand()
+    expect(sent).toMatchObject({ type: COMMANDS.SESSION_START, payload: { dialSessionId: 'ds-1', dial: false } })
+    symbo.refuse(sent.requestId, ERRORS.POWER_DIALING_NOT_ENABLED, 'Power dialing is not enabled')
+    await expect(start).rejects.toMatchObject({ code: ERRORS.POWER_DIALING_NOT_ENABLED })
+
+    const counts = { queued: 0, dialing: 0, attempted: 1, completed: 0, cancelled: 2, removed: 0, remaining: 0 }
+    await roundTrip(
+      symbo,
+      dialer.session.end({ dialSessionId: 'ds-other' }),
+      COMMANDS.SESSION_END,
+      { force: false, dialSessionId: 'ds-other' },
+      { dialSessionId: 'ds-other', counts }
+    )
+
+    const removal = dialer.session.removeQueued(['q-1'])
+    sent = symbo.lastCommand()
+    expect(sent).toMatchObject({ type: COMMANDS.SESSION_REMOVE_QUEUED, payload: { queuedCallIds: ['q-1'] } })
+    symbo.refuse(sent.requestId, ERRORS.NO_ACTIVE_SESSION, 'No dial session is loaded')
+    await expect(removal).rejects.toMatchObject({ code: ERRORS.NO_ACTIVE_SESSION })
+  })
+
   it('answers NOT_READY rather than NOT_SUPPORTED before the frame has said what it supports', async () => {
     const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
     dialer.mount().catch(() => {})

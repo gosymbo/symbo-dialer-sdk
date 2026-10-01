@@ -276,8 +276,9 @@
       // Symbo never reloads the dialer for a newer version by itself; offer it when the rep is free.
       d.on('update.available', () => (ui.update.hidden = false))
       // The dialer reloaded (asked for, or not). Whatever it held is gone: a session running in it is
-      // paused on Symbo's side, and a call still waiting for its outcome has to be saved from your
-      // server (PUT /calls/{id}). Start picks the session back up.
+      // paused on Symbo's side, and a call still waiting for its outcome is saved by id, with
+      // dialer.saveOutcome({ callId }) or from your server (PUT /calls/{id}). Start picks the session
+      // back up.
       d.on('frame.reloaded', (p) => {
         ui.update.hidden = true
         if (!activeSession) return

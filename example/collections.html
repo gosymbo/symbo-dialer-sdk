@@ -1054,17 +1054,18 @@
 
         // ---- one-off and inbound calls end here
         //
-        // A call outside a session has no outcome form in the frame and no
-        // command to save one: this is where a real page would show its own
-        // post-call screen and post the outcome from its server. Nothing
-        // else follows in the page — no call.completed.
+        // A call outside a session has no outcome form in the frame: this is
+        // where a real page would show its own post-call screen and save it
+        // with dialer.saveOutcome({ outcomeId | outcomeValue, note }), which
+        // sends call.completed. A frame without 'saveOutcome' leaves it to
+        // your server (PUT /calls/{id}), and no call.completed follows.
         dialer.on('call.postCall', ({ callId, answered, durationSeconds }) => {
           // A session's calls go through the post-call panel above.
           if (session) return
-          setStatus(
-            `Call ended · ${answered ? 'answered' : 'no answer'} · ${durationSeconds}s — your server saves the outcome: PUT /calls/${callId}`,
-            'warn'
-          )
+          const save = dialer.hasCapability('saveOutcome')
+            ? 'save its outcome with dialer.saveOutcome()'
+            : `your server saves the outcome: PUT /calls/${callId}`
+          setStatus(`Call ended · ${answered ? 'answered' : 'no answer'} · ${durationSeconds}s — ${save}`, 'warn')
         })
 
         refreshButtons()
