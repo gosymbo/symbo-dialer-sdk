@@ -1330,11 +1330,9 @@
       if (session.status === 'dialing') return ok(msg)
       if (call) return refuse(msg, 'CALL_IN_PROGRESS', OTHER_CALL_MESSAGE)
       if (dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
+      if (sessionConnected()) return refuse(msg, 'CALL_IN_PROGRESS', 'A call is in progress')
       if (session.postCall) return refuse(msg, 'OUTCOME_PENDING', 'Save an outcome for the last call first.')
       ok(msg)
-      // With a call connected there is nothing to resume yet: the engine
-      // moves on once that call ends and its outcome is saved.
-      if (sessionConnected()) return
       session.pausedByRequest = false
       dismissIncoming()
       resumeDialing()

@@ -1041,9 +1041,10 @@ class SymboDialerClient {
    * are on. Resolves with `{ muted }`; `call.muteChanged` follows when that
    * changed anything. Mute lasts as long as the rep's line, as in Symbo: in a
    * power-dial session that line can outlast a conversation, and drops when
-   * the rep hangs up, pauses or holds, or the session ends. Refused with
-   * NO_ACTIVE_CALL while the rep's line is down. Check `hasCapability('mute')`
-   * against an older Symbo release, which answers UNKNOWN_COMMAND.
+   * the rep hangs up, pauses (unless a contact is on the line) or holds, or
+   * the session ends. Refused with NO_ACTIVE_CALL while the rep's line is
+   * down. Check `hasCapability('mute')` against an older Symbo release, which
+   * answers UNKNOWN_COMMAND.
    */
   setMuted(arg) {
     const muted = arg && typeof arg === 'object' ? arg.muted : arg

@@ -531,8 +531,13 @@ engine is dialing. One that arrives while it dials follows the rep's normal
 no-answer routing (voicemail, forwarding). One inbound call rings at a time,
 and `call.ended { reason: 'cancelled' }` arrives for every `call.incoming` that
 stops ringing unanswered: the caller gave up, it was ignored (by you or in
-Symbo), it rang out after 30 s, or `session.start()` or `session.resume()` was
-asked to dial, even if the queue turned out to be empty.
+Symbo), it rang out after 30 s, or the session started dialing over it.
+`session.start()`, and `session.resume()` on a paused session with no call in
+front, dismiss it as soon as they set the engine dialing, even if the queue
+then turns out to be empty. Dialing on after a session call
+(`session.resume()` or `session.saveOutcome({ then: 'resume' })` in the
+post-call step, or `session.skipCurrent()`) dismisses it only when a contact is
+left to dial.
 
 `answerIncoming()` takes the call when the rep's line is free. Over a one-off
 call it is refused with `CALL_IN_PROGRESS`, and over a session's call in front
@@ -713,7 +718,7 @@ your server makes with `PUT /calls/{id}` does not reach it, so
 
 | You call | What happens |
 | --- | --- |
-| `session.pause()` | Lines that are ringing are hung up (they get the cancelled default outcome) and the rep's line drops. A connected call is **never** cut: the engine stays paused after it until you resume. In the post-call step the line drops too and, once the outcome, note and required call fields are in, the call leaves the rep's view, as Symbo's Back does; until then it stays in front and `session.saveOutcome` still saves it. `session.paused { reason: 'requested' }` follows. If `end()` was asked for during the call, or an admin closed the session, a pause in the post-call step completes that and `session.ended` arrives instead. Pausing frees the line for `dial()` and inbound calls |
+| `session.pause()` | Lines that are ringing are hung up (they get the cancelled default outcome) and the rep's line drops. A connected call is **never** cut: the engine stays paused after it until you resume. In the post-call step the line drops too and, once the outcome, note and required call fields are in, the call leaves the rep's view, as Symbo's Back does; until then it stays in front and `session.saveOutcome` still saves it. `session.paused { reason: 'requested' }` follows. If `end()` was asked for during the call, or an admin closed the session, a pause in the post-call step completes that and `session.ended` arrives instead. Pausing frees the line for `dial()` and inbound calls once none of the session's calls is in front of the rep: not while a contact is connected, and not while a post-call step still missing its outcome, note or required call fields stays in front (complete it with `session.saveOutcome` first; `answerIncoming({ endCurrent: true })` works meanwhile) |
 | `session.resume()` | Dials the next round. Refused with `OUTCOME_PENDING` while a call is waiting for its outcome, and with `CALL_IN_PROGRESS` while a contact is still on the line (hang up or `skipCurrent()` first), another call — one-off or inbound — is up, or a `dial()` is still being placed |
 | `session.saveOutcome({ …, then })` | Saves the outcome, note and call fields on the call, then `'resume'` (next round), `'pause'` or `'end'`. `'pause'` on a call that has ended closes it and drops the rep's line, as Symbo's Back does: `session.paused { reason: 'requested' }` follows and `getState()` reads `paused`. With a required call field still missing only the line drops, no event is sent and it keeps reading `post_call`; a save during the call keeps reading `connected`. If `end()` was asked for during the call, or an admin closed the session, a `'pause'` save completes that and `session.ended` arrives instead. `'resume'` is refused, before anything is saved, with `REALTIME_DISCONNECTED` while realtime is down and with `CALL_IN_PROGRESS` while another call is up or a `dial()` is still being placed |
 | `session.skipCurrent()` | Hangs up the connected call and skips its outcome |
@@ -793,7 +798,7 @@ and mute lasts as long as that line, as in Symbo itself. On a one-off or
 inbound call the line is the call. In a power-dial session it is the rep's own
 leg, which stays up while lines ring and can outlast a conversation, so mute
 can carry into the next one; it drops, taking mute with it, when the rep hangs
-up, pauses (whatever the session is doing) or holds, when the queue runs out,
+up, pauses (unless a contact is on the line) or holds, when the queue runs out,
 and when the session ends. `call.muteChanged` reports
 every change, whoever made it — this page, Symbo's own button in widget mode,
 the line dropping, or a frame reload — and `dialer.muted` follows it, so draw

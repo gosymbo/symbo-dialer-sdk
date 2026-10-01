@@ -199,6 +199,9 @@ describe('the offline stub, driven through the SDK', () => {
     expect(state.session.legs).toHaveLength(1)
     expect(state.session.counts).toMatchObject({ dialing: 1, attempted: 1, queued: 4, remaining: 4 })
 
+    // The engine dials on only once the contact is off the line.
+    await expect(dialer.session.resume()).rejects.toMatchObject({ code: 'CALL_IN_PROGRESS' })
+
     // The rep hangs up: the leg ends and the frame asks for an outcome.
     seen.length = 0
     await vi.advanceTimersByTimeAsync(1000)
