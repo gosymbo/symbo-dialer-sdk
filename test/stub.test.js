@@ -594,6 +594,29 @@ describe('the offline stub, driven through the SDK', () => {
     expect(dialer.warnings.size).toBe(0)
   })
 
+  it('holds warnings raised before ready until it, and clears only the ones the page heard', async () => {
+    const { dialer, stub } = await mountOnStub({ signedIn: false })
+    await vi.advanceTimersByTimeAsync(2000)
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+
+    // Raised and withdrawn before ready: the page hears neither.
+    stub.poke('stub:realtimeBlip')
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(seen).toEqual([])
+
+    // Still raised at ready: sent once, after it.
+    stub.poke('stub:realtimeBlip')
+    await dialer.signIn({ token: 'demo-token', profileId: PROFILE_ID })
+    const names = seen.map(([n, p]) => (p?.code ? `${n}:${p.code}` : n))
+    expect(names.slice(0, 3)).toEqual(['warning.cleared:NOT_SIGNED_IN', 'ready', 'warning:REALTIME_DISCONNECTED'])
+    expect(stub.sentOfType('symbo:warning').map(({ code }) => code)).toEqual(['NOT_SIGNED_IN', 'REALTIME_DISCONNECTED'])
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(seen.at(-1)).toEqual(['warning.cleared', { code: 'REALTIME_DISCONNECTED' }])
+    expect(dialer.warnings.size).toBe(0)
+  })
+
   it('renders nothing in hidden mode', async () => {
     const { stub, mounting } = await mountOnStub({ mode: 'hidden' })
     await mounting
@@ -1213,6 +1236,22 @@ describe('the offline stub, driven through the SDK', () => {
     expect(dialer.warnings.has('DEVICE_NOT_READY')).toBe(false)
   })
 
+  it('will not dial a session while a dial() is still being placed', async () => {
+    const { dialer, mounting } = await mountOnStub()
+    await mounting
+    const dialing = dialer.dial({ number: '+12125550123' })
+    const pending = { code: 'CALL_IN_PROGRESS', message: 'A dial is already being placed.' }
+    await expect(dialer.session.start({ dialSessionId: 'ds-demo' })).rejects.toMatchObject(pending)
+
+    // Loading without dialing leaves the line alone; resuming it is refused alike.
+    expect((await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })).dialing).toBe(false)
+    await expect(dialer.session.resume()).rejects.toMatchObject(pending)
+
+    await vi.advanceTimersByTimeAsync(300)
+    expect((await dialing).callId).toBeTruthy()
+    expect((await dialer.getState()).session.status).toBe('paused')
+  })
+
   /* ------------------------------------------------- reloads nobody asked for */
 
   it('announces a plan change, and reloads by itself once the rep is free', async () => {
@@ -1263,6 +1302,24 @@ describe('the offline stub, driven through the SDK', () => {
     dialer.iframe.dispatch('load')
     expect(last('frame.reloaded')).toEqual({ requested: false, reason: 'signed_out_elsewhere' })
     expect(last('auth.required')).toMatchObject({ reloadReason: 'signed_out_elsewhere' })
+  })
+
+  it('does not follow a sign-out in another frame while a dial() is being placed', async () => {
+    const { dialer, stub, mounting } = await mountOnStub()
+    await mounting
+    const seen = []
+    dialer.on('*', (name) => seen.push(name))
+    const dialing = dialer.dial({ number: '+12125550123' })
+    stub.poke('stub:signOut')
+    expect(dialer.warnings.has('SIGNED_OUT_ELSEWHERE')).toBe(true)
+    expect(seen).not.toContain('frame.leaving')
+
+    await vi.advanceTimersByTimeAsync(300)
+    await dialing
+    await dialer.hangUp()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(seen).toContain('frame.leaving')
+    expect(stub.storage.has('symbo-stub:signedIn')).toBe(false)
   })
 
   it('carries out nothing once it has said frame.leaving for a plan change, but answers reload', async () => {

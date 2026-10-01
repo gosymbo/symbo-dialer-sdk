@@ -269,14 +269,21 @@
     }
   }
 
+  // Like the real frame, a page that has not heard ready yet is told only
+  // that nobody is signed in; other warnings wait for ready, and only the
+  // ones the page heard are cleared to it.
+  const sentWarnings = new Set()
   const raiseWarning = (code, message) => {
     warnings.set(code, message)
-    post('symbo:warning', { code, message })
+    if (readyAnnounced || code === 'NOT_SIGNED_IN') {
+      sentWarnings.add(code)
+      post('symbo:warning', { code, message })
+    }
     render()
   }
   const clearWarning = (code) => {
     if (!warnings.delete(code)) return
-    post('symbo:warning.cleared', { code })
+    if (sentWarnings.delete(code)) post('symbo:warning.cleared', { code })
     render()
   }
 
@@ -321,6 +328,10 @@
       updateAvailable,
       resumableSession: resumableView(),
       reloadReason: takeReloadReason(),
+    })
+    warnings.forEach((message, code) => {
+      sentWarnings.add(code)
+      post('symbo:warning', { code, message })
     })
     // Like the real frame, a newer build is only announced: the page decides
     // when to reload for it.
@@ -416,7 +427,7 @@
   const signedOutElsewhere = () => {
     if (!signedIn || followingSignOut) return
     followingSignOut = true
-    const blocked = () => !!busyRefusal('following a sign-out')
+    const blocked = () => dialInFlight || !!busyRefusal('following a sign-out')
     if (blocked()) {
       raiseWarning(
         'SIGNED_OUT_ELSEWHERE',
@@ -944,6 +955,7 @@
   }
 
   const OTHER_CALL_MESSAGE = 'Another call is in progress. Resume the session once it has ended.'
+  const DIAL_PENDING_MESSAGE = 'A dial is already being placed.'
 
   const handlers = {
     'symbo:hello'() {
@@ -1010,7 +1022,7 @@
     'symbo:dial'(msg) {
       const { number, prospectId, externalId } = msg.payload
       if (!signedIn) return refuse(msg, 'NOT_SIGNED_IN', 'Sign in first.')
-      if (dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', 'A dial is already being placed.')
+      if (dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
       const refusal = dialRefusal()
       if (refusal) return refuse(msg, ...refusal)
       let target
@@ -1257,6 +1269,7 @@
       if (session) return refuse(msg, 'SESSION_ALREADY_ACTIVE', `Session ${session.dialSessionId} is active.`)
       // Loading without dialing leaves the line alone.
       if (dial && call) return refuse(msg, 'CALL_IN_PROGRESS', 'A call is active. Hang up before starting a session.')
+      if (dial && dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
       if (!dialSessionId || /missing/i.test(dialSessionId)) {
         return refuse(msg, 'SESSION_NOT_FOUND', `No dial session ${dialSessionId}.`)
       }
@@ -1306,6 +1319,7 @@
       }
       if (session.status === 'dialing') return ok(msg)
       if (call) return refuse(msg, 'CALL_IN_PROGRESS', OTHER_CALL_MESSAGE)
+      if (dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
       if (session.postCall) return refuse(msg, 'OUTCOME_PENDING', 'Save an outcome for the last call first.')
       ok(msg)
       // With a call connected there is nothing to resume yet: the engine
