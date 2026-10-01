@@ -152,10 +152,13 @@ describe('the offline stub, driven through the SDK', () => {
     expect(await dialer.session.start({ dialSessionId: 'ds-demo' })).toEqual({
       dialSessionId: 'ds-demo',
       concurrentCalls: 2,
+      concurrentCallsLocked: false,
+      dialing: true,
     })
     await expect(dialer.session.start({ dialSessionId: 'ds-demo' })).rejects.toMatchObject({
       code: 'SESSION_ALREADY_ACTIVE',
     })
+    // The engine is dialing: the line is the session's.
     await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'SESSION_ACTIVE' })
 
     // Round one: two legs ring, the second answers, the first is cancelled.
@@ -195,6 +198,9 @@ describe('the offline stub, driven through the SDK', () => {
     expect(state.session.status).toBe('connected')
     expect(state.session.legs).toHaveLength(1)
     expect(state.session.counts).toMatchObject({ dialing: 1, attempted: 1, queued: 4, remaining: 4 })
+
+    // The engine dials on only once the contact is off the line.
+    await expect(dialer.session.resume()).rejects.toMatchObject({ code: 'CALL_IN_PROGRESS' })
 
     // The rep hangs up: the leg ends and the frame asks for an outcome.
     seen.length = 0
@@ -275,18 +281,28 @@ describe('the offline stub, driven through the SDK', () => {
     expect(names()).toEqual(['session.leg.ended', 'session.queue.updated'])
     expect(seen[0][1]).toMatchObject({ queuedCallId: 'q-5', reason: 'cancelled' })
 
-    // Nothing left: resuming runs out of calls and the session ends. The
-    // engine never resumed, so there is no session.resumed.
+    // Nothing left: resuming runs out of calls. The engine never resumed, so
+    // there is no session.resumed, and nothing ends the session: it stays
+    // loaded and paused, its line down, until it is ended or held.
     seen.length = 0
     expect(await dialer.session.resume()).toEqual({})
-    expect(names()).toEqual(['session.noMoreCalls', 'session.ended'])
-    expect(seen[1][1].counts).toMatchObject({
+    expect(names()).toEqual(['session.noMoreCalls'])
+    expect(seen[0][1]).toMatchObject({ dialSessionId: 'ds-demo', sessionOpen: true })
+    expect(seen[0][1].counts).toMatchObject({
       queued: 0,
       remaining: 0,
       completed: 1,
       cancelled: 1,
       attempted: 4,
     })
+    const open = await dialer.getState()
+    expect(open.session.status).toBe('paused')
+    await expect(dialer.setMuted(true)).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+
+    seen.length = 0
+    const ended = await dialer.session.end()
+    expect(names()).toEqual(['session.ended'])
+    expect(ended).toEqual({ dialSessionId: 'ds-demo', counts: open.session.counts })
     await expect(dialer.session.pause()).rejects.toMatchObject({ code: 'NO_ACTIVE_SESSION' })
   })
 
@@ -383,7 +399,14 @@ describe('the offline stub, driven through the SDK', () => {
     seen.length = 0
     await dialer.ignoreIncoming()
     expect(seen.map(([n]) => n)).toEqual(['call.ended'])
-    expect(seen[0][1]).toMatchObject({ callId: incoming[1].callId, reason: 'ignored' })
+    expect(seen[0][1]).toMatchObject({ callId: incoming[1].callId, reason: 'cancelled' })
+
+    // One that rings out unanswered ends the same way.
+    stub.poke('stub:ringInbound')
+    const rangOut = seen.filter(([n]) => n === 'call.incoming').pop()[1]
+    seen.length = 0
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(seen).toEqual([['call.ended', { callId: rangOut.callId, reason: 'cancelled', durationSeconds: 0 }]])
 
     // The example page pokes the stub to ring again; answer this one.
     seen.length = 0
@@ -391,8 +414,7 @@ describe('the offline stub, driven through the SDK', () => {
     const second = seen.find(([n]) => n === 'call.incoming')[1]
     expect(await dialer.answerIncoming()).toEqual({ callId: second.callId })
     // The far end hangs up after 6 s. An answered inbound call ends at
-    // call.postCall: its outcome is saved by the partner's server, so no
-    // call.completed follows in the page.
+    // call.postCall, like a one-off call; call.completed only follows a save.
     await vi.advanceTimersByTimeAsync(8000)
     expect(seen.map(([n]) => n)).toEqual([
       'call.incoming',
@@ -423,9 +445,8 @@ describe('the offline stub, driven through the SDK', () => {
     await vi.advanceTimersByTimeAsync(2000)
     expect(await dialer.hangUp()).toEqual({})
     await vi.advanceTimersByTimeAsync(2000)
-    // call.postCall is the last word on a one-off call: embed mode has no
-    // outcome form and no command to save one, so the page never sees
-    // call.completed for it.
+    // call.postCall ends a one-off call; call.completed only follows a save
+    // (dialer.saveOutcome).
     expect(seen.map(([n]) => n)).toEqual([
       'call.started',
       'call.ringing',
@@ -576,6 +597,29 @@ describe('the offline stub, driven through the SDK', () => {
     expect(dialer.warnings.size).toBe(0)
   })
 
+  it('holds warnings raised before ready until it, and clears only the ones the page heard', async () => {
+    const { dialer, stub } = await mountOnStub({ signedIn: false })
+    await vi.advanceTimersByTimeAsync(2000)
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+
+    // Raised and withdrawn before ready: the page hears neither.
+    stub.poke('stub:realtimeBlip')
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(seen).toEqual([])
+
+    // Still raised at ready: sent once, after it.
+    stub.poke('stub:realtimeBlip')
+    await dialer.signIn({ token: 'demo-token', profileId: PROFILE_ID })
+    const names = seen.map(([n, p]) => (p?.code ? `${n}:${p.code}` : n))
+    expect(names.slice(0, 3)).toEqual(['warning.cleared:NOT_SIGNED_IN', 'ready', 'warning:REALTIME_DISCONNECTED'])
+    expect(stub.sentOfType('symbo:warning').map(({ code }) => code)).toEqual(['NOT_SIGNED_IN', 'REALTIME_DISCONNECTED'])
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(seen.at(-1)).toEqual(['warning.cleared', { code: 'REALTIME_DISCONNECTED' }])
+    expect(dialer.warnings.size).toBe(0)
+  })
+
   it('renders nothing in hidden mode', async () => {
     const { stub, mounting } = await mountOnStub({ mode: 'hidden' })
     await mounting
@@ -639,6 +683,8 @@ describe('the offline stub, driven through the SDK', () => {
     expect(await dialer.session.start({ dialSessionId: 'ds-demo', concurrentCalls: 2 })).toEqual({
       dialSessionId: 'ds-demo',
       concurrentCalls: 2,
+      concurrentCallsLocked: true,
+      dialing: true,
     })
     await expect(dialer.session.setConcurrentCalls(4)).rejects.toMatchObject({ code: 'CONCURRENT_CALLS_LOCKED' })
     expect(await dialer.session.setConcurrentCalls(2)).toEqual({ dialSessionId: 'ds-demo', concurrentCalls: 2 })
@@ -664,6 +710,721 @@ describe('the offline stub, driven through the SDK', () => {
     await dialer.session.end({ force: true })
     expect(await dialer.reload()).toEqual({ reloading: true })
     await vi.advanceTimersByTimeAsync(300)
+    expect(stub.reloads).toHaveLength(1)
+  })
+
+  it('reloads hard on request', async () => {
+    const { dialer, stub, mounting } = await mountOnStub()
+    await mounting
+    expect(dialer.hasCapability('hardReload')).toBe(true)
+    expect(await dialer.reload({ hard: true })).toEqual({ reloading: true, hard: true })
+    await vi.advanceTimersByTimeAsync(300)
+    expect(stub.reloads).toHaveLength(1)
+  })
+
+  /* ------------------------------------------------ calls during a session */
+
+  // A client on the stub, device registered, every event recorded.
+  const readyOnStub = async (options) => {
+    const { dialer, stub, mounting } = await mountOnStub(options)
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+    const names = () => seen.map(([n]) => n)
+    const last = (name) => seen.filter(([n]) => n === name).pop()?.[1]
+    return { dialer, stub, seen, names, last }
+  }
+
+  it('places and answers calls while a paused session has its line down, and not while the session has it', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    expect(dialer.hasCapability('callsWhilePaused')).toBe(true)
+
+    // Dialing: the line is the session's, and no inbound call is offered.
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({
+      code: 'SESSION_ACTIVE',
+      message:
+        'A power-dial session is dialing or has a call in front of the rep. Pause the session, or finish its post-call step, before dialing.',
+    })
+    stub.poke('stub:ringInbound')
+    expect(names()).not.toContain('call.incoming')
+
+    // Paused: an ordinary call goes out, and the session waits for it.
+    await dialer.session.pause()
+    seen.length = 0
+    const { callId } = await dialer.dial({ number: '+12125550123' })
+    expect(names()).toEqual(['call.started'])
+    const state = await dialer.getState()
+    expect(state.session.status).toBe('paused')
+    expect(state.call).toMatchObject({ callId, status: 'dialing' })
+    await expect(dialer.session.resume()).rejects.toMatchObject({
+      code: 'CALL_IN_PROGRESS',
+      message: 'Another call is in progress. Resume the session once it has ended.',
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    seen.length = 0
+    await dialer.hangUp()
+    expect(names()).toEqual(['call.ended', 'call.postCall'])
+
+    // An inbound call rings while the session is paused, and is taken.
+    stub.poke('stub:ringInbound')
+    const ring = last('call.incoming')
+    expect(await dialer.answerIncoming()).toEqual({ callId: ring.callId })
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'CALL_IN_PROGRESS' })
+    await dialer.hangUp()
+
+    // The line is free again: the session dials on.
+    seen.length = 0
+    await dialer.session.resume()
+    expect(names()[0]).toBe('session.resumed')
+  })
+
+  it("answers over a session's connected call with endCurrent, Symbo's End & Accept", async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    expect(dialer.hasCapability('callWaiting')).toBe(true)
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(2100)
+    await dialer.setMuted(true)
+
+    // Offered during the conversation, but not taken over it unasked.
+    stub.poke('stub:ringInbound')
+    const ring = last('call.incoming')
+    await expect(dialer.answerIncoming()).rejects.toMatchObject({
+      code: 'SESSION_ACTIVE',
+      message:
+        'A power-dial session call is in front of the rep. Answer with { endCurrent: true } to end it and take this call.',
+    })
+
+    seen.length = 0
+    expect(await dialer.answerIncoming({ endCurrent: true })).toEqual({ callId: ring.callId })
+    expect(names()).toEqual([
+      'session.leg.ended',
+      'session.postCall',
+      'session.queue.updated',
+      'call.muteChanged',
+      'session.paused',
+      'call.answered',
+    ])
+    expect(seen[1][1]).toMatchObject({ queuedCallId: 'q-2', outcomeRequired: true })
+    expect(seen[4][1]).toEqual({ dialSessionId: 'ds-demo', reason: 'incoming' })
+    const state = await dialer.getState()
+    expect(state.session.status).toBe('post_call')
+    expect(state.call).toMatchObject({ callId: ring.callId, status: 'connected' })
+
+    // The session waits for the inbound call, then for its own outcome.
+    await expect(dialer.session.resume()).rejects.toMatchObject({ code: 'CALL_IN_PROGRESS' })
+    await dialer.hangUp()
+    await expect(dialer.session.resume()).rejects.toMatchObject({ code: 'OUTCOME_PENDING' })
+    seen.length = 0
+    await dialer.session.saveOutcome({ outcomeId: 'o-connected', then: 'resume' })
+    expect(names()).toContain('session.resumed')
+  })
+
+  it('answers over a one-off call with endCurrent; the ended call is saved by id', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    const { callId: first } = await dialer.dial({ prospectId: 'p-1004' })
+    await vi.advanceTimersByTimeAsync(2000)
+    stub.poke('stub:ringInbound')
+    const ring = last('call.incoming')
+    await expect(dialer.answerIncoming()).rejects.toMatchObject({
+      code: 'CALL_IN_PROGRESS',
+      message: 'A call is already active. Hang up, or answer with { endCurrent: true }.',
+    })
+
+    seen.length = 0
+    expect(await dialer.answerIncoming({ endCurrent: true })).toEqual({ callId: ring.callId })
+    expect(names()).toEqual(['call.ended', 'call.postCall', 'call.answered'])
+    expect(seen[0][1]).toMatchObject({ callId: first, reason: 'hangup' })
+
+    // Answering dropped that call's post-call step, as End & Accept does in
+    // Symbo; its outcome is still saved by id, quietly.
+    seen.length = 0
+    expect(
+      await dialer.saveOutcome({ callId: first, outcomeId: 'o-callback', note: 'Ring back Monday' })
+    ).toEqual({ callId: first, outcomeId: 'o-callback' })
+    expect(names()).toEqual([])
+  })
+
+  it('ends a one-off call taken over by endCurrent while a session call waits for its outcome', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    // Connected at 2 s; the contact hangs up 6 s later.
+    await vi.advanceTimersByTimeAsync(8100)
+    expect((await dialer.getState()).session.status).toBe('post_call')
+    stub.poke('stub:ringInbound')
+    const first = last('call.incoming')
+    await dialer.answerIncoming({ endCurrent: true })
+
+    stub.poke('stub:ringInbound')
+    const second = last('call.incoming')
+    seen.length = 0
+    expect(await dialer.answerIncoming({ endCurrent: true })).toEqual({ callId: second.callId })
+    expect(names()).toEqual(['call.ended', 'call.postCall', 'call.answered'])
+    expect(seen[0][1]).toMatchObject({ callId: first.callId, reason: 'hangup' })
+    expect(seen[1][1]).toMatchObject({ callId: first.callId })
+    const state = await dialer.getState()
+    expect(state.session.status).toBe('post_call')
+    expect(state.call).toMatchObject({ callId: second.callId, status: 'connected' })
+  })
+
+  it("leaves a one-off call's mute alone when a paused session is paused again or held", async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
+    const { callId } = await dialer.dial({ number: '+12125550123' })
+    await vi.advanceTimersByTimeAsync(2000)
+    await dialer.setMuted(true)
+
+    seen.length = 0
+    await dialer.session.pause()
+    await dialer.session.hold()
+    expect(names()).not.toContain('call.muteChanged')
+    expect(dialer.muted).toBe(true)
+    const state = await dialer.getState()
+    expect(state.muted).toBe(true)
+    expect(state.call).toMatchObject({ callId, status: 'connected' })
+  })
+
+  it("pauses from the post-call step by dropping the rep's line; the call stays until it is saved", async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(2100)
+    await dialer.setMuted(true)
+    // The contact hangs up; the rep's line stays up.
+    await vi.advanceTimersByTimeAsync(6000)
+    expect((await dialer.getState()).session.status).toBe('post_call')
+    expect(dialer.muted).toBe(true)
+
+    seen.length = 0
+    expect(await dialer.session.pause()).toEqual({})
+    expect(names()).toEqual(['call.muteChanged', 'session.paused', 'session.queue.updated'])
+    expect(seen[1][1]).toEqual({ dialSessionId: 'ds-demo', reason: 'requested' })
+    expect((await dialer.getState()).session.status).toBe('post_call')
+    await expect(dialer.setMuted(true)).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'SESSION_ACTIVE' })
+
+    seen.length = 0
+    await dialer.session.saveOutcome({ outcomeId: 'o-meeting', then: 'pause' })
+    expect(names()).toEqual(['call.completed', 'session.queue.updated', 'session.paused'])
+    expect((await dialer.getState()).session.status).toBe('paused')
+    // The call has left the rep's view: the line is free.
+    expect((await dialer.dial({ number: '+12125550123' })).callId).toBeTruthy()
+  })
+
+  it("a save that pauses closes the call and drops the rep's line", async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(2100)
+    await dialer.setMuted(true)
+    await vi.advanceTimersByTimeAsync(6000)
+
+    seen.length = 0
+    await dialer.session.saveOutcome({ outcomeId: 'o-meeting', then: 'pause' })
+    expect(names()).toEqual(['call.completed', 'session.queue.updated', 'call.muteChanged', 'session.paused'])
+    expect(dialer.muted).toBe(false)
+    expect((await dialer.getState()).session.status).toBe('paused')
+  })
+
+  it('holds the session, and session.start picks it up where it was', async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    expect(dialer.hasCapability('sessionHold')).toBe(true)
+    await dialer.session.start({ dialSessionId: 'ds-demo', concurrentCalls: 3 })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(dialer.concurrentCalls).toBe(3)
+
+    seen.length = 0
+    const held = await dialer.session.hold()
+    expect(names()).toEqual(['session.leg.ended', 'session.leg.ended', 'session.leg.ended', 'session.held'])
+    expect(seen[0][1].reason).toBe('cancelled')
+    expect(held).toEqual(seen[3][1])
+    expect(held).toMatchObject({ dialSessionId: 'ds-demo', counts: { dialing: 3, queued: 3 } })
+    expect(dialer.concurrentCalls).toBe(1)
+    expect((await dialer.getState()).session).toBeNull()
+    await expect(dialer.session.hold()).rejects.toMatchObject({ code: 'NO_ACTIVE_SESSION' })
+
+    // Picked up again, the calls the hold hung up are back on the queue.
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    expect(dialer.concurrentCalls).toBe(3)
+    const { queue } = await dialer.session.getQueue()
+    expect(queue.map((r) => [r.queuedCallId, r.status, r.attempts])).toEqual([
+      ['q-1', 'dialing', 2],
+      ['q-2', 'dialing', 2],
+      ['q-3', 'dialing', 2],
+      ['q-4', 'queued', 0],
+      ['q-5', 'queued', 0],
+      ['q-6', 'queued', 0],
+    ])
+
+    // Not over a connected call; from its post-call step, without an outcome.
+    await vi.advanceTimersByTimeAsync(2100)
+    await expect(dialer.session.hold()).rejects.toMatchObject({
+      code: 'CALL_IN_PROGRESS',
+      message: 'A call is connected. Hold the session once it has ended.',
+    })
+    await dialer.hangUp()
+    expect((await dialer.session.hold()).dialSessionId).toBe('ds-demo')
+  })
+
+  it('loads a session without dialing, reports the resumable one, and resume dials it', async () => {
+    const { dialer, seen, names } = await readyOnStub({ query: 'resumable=ds-demo' })
+    expect(dialer.hasCapability('sessionLoad')).toBe(true)
+    expect(dialer.resumableSession).toEqual({ dialSessionId: 'ds-demo', status: 'paused' })
+    expect((await dialer.getState()).resumableSession).toEqual({ dialSessionId: 'ds-demo', status: 'paused' })
+
+    expect(await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })).toEqual({
+      dialSessionId: 'ds-demo',
+      concurrentCalls: 2,
+      concurrentCallsLocked: false,
+      dialing: false,
+    })
+    expect(names()).toEqual(['session.started', 'session.queue.updated'])
+    expect(seen[0][1]).toMatchObject({ dialSessionId: 'ds-demo', dialing: false })
+    expect(dialer.resumableSession).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(names()).not.toContain('session.leg.ringing')
+    const state = await dialer.getState()
+    expect(state.session.status).toBe('paused')
+    expect(state.resumableSession).toBeNull()
+    await expect(dialer.setMuted(true)).rejects.toMatchObject({ code: 'NO_ACTIVE_CALL' })
+
+    seen.length = 0
+    await dialer.session.resume()
+    await vi.advanceTimersByTimeAsync(300)
+    expect(names()).toEqual(['session.resumed', 'session.queue.updated', 'session.leg.ringing', 'session.leg.ringing'])
+  })
+
+  it('ends a ringing inbound call with call.ended when the engine starts or resumes dialing', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    stub.poke('stub:ringInbound')
+    const first = last('call.incoming')
+    seen.length = 0
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    expect(names().slice(0, 2)).toEqual(['call.ended', 'session.started'])
+    expect(seen[0][1]).toEqual({ callId: first.callId, reason: 'cancelled', durationSeconds: 0 })
+
+    await dialer.session.pause()
+    stub.poke('stub:ringInbound')
+    const second = last('call.incoming')
+    seen.length = 0
+    await dialer.session.resume()
+    expect(names().slice(0, 2)).toEqual(['call.ended', 'session.resumed'])
+    expect(seen[0][1]).toMatchObject({ callId: second.callId, reason: 'cancelled' })
+  })
+
+  it('asked to dial an empty queue, dismisses a ringing inbound call and says noMoreCalls before session.started', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
+    await dialer.session.removeQueued(['q-1', 'q-2', 'q-3', 'q-4', 'q-5', 'q-6'])
+    await dialer.session.hold()
+
+    stub.poke('stub:ringInbound')
+    const first = last('call.incoming')
+    seen.length = 0
+    expect((await dialer.session.start({ dialSessionId: 'ds-demo' })).dialing).toBe(false)
+    expect(names()).toEqual(['call.ended', 'session.noMoreCalls', 'session.started', 'session.queue.updated'])
+    expect(seen[0][1]).toEqual({ callId: first.callId, reason: 'cancelled', durationSeconds: 0 })
+    expect(seen[1][1]).toMatchObject({ dialSessionId: 'ds-demo', sessionOpen: true })
+    expect(seen[2][1]).toMatchObject({ dialSessionId: 'ds-demo', dialing: false })
+
+    // A resume does the same, and does not say session.resumed.
+    stub.poke('stub:ringInbound')
+    const second = last('call.incoming')
+    seen.length = 0
+    await dialer.session.resume()
+    expect(names()).toEqual(['call.ended', 'session.noMoreCalls'])
+    expect(seen[0][1]).toMatchObject({ callId: second.callId, reason: 'cancelled' })
+  })
+
+  /* ------------------------------------------------------ one-off outcomes */
+
+  it("saves a one-off call's outcome from the page: call.completed follows, and the call is done", async () => {
+    const { dialer, seen, names, last } = await readyOnStub()
+    expect(dialer.hasCapability('saveOutcome')).toBe(true)
+    const { callId } = await dialer.dial({ prospectId: 'p-1004', externalId: 'case-9' })
+    await vi.advanceTimersByTimeAsync(2000)
+    await dialer.hangUp()
+    const postCall = last('call.postCall')
+    expect(postCall).toEqual({
+      callId,
+      prospectId: 'p-1004',
+      answered: true,
+      durationSeconds: expect.any(Number),
+      outcomeRequired: true,
+      blocksDialing: false,
+      restored: false,
+      dialedAt: null,
+    })
+    expect((await dialer.getState()).call).toMatchObject({
+      callId,
+      status: 'post_call',
+      blocksDialing: false,
+      restored: false,
+      dialedAt: null,
+    })
+
+    await expect(dialer.saveOutcome({ note: 'No outcome yet' })).rejects.toMatchObject({
+      code: 'OUTCOME_PENDING',
+    })
+    await expect(dialer.saveOutcome({ outcomeId: 'o-nope' })).rejects.toMatchObject({
+      code: 'OUTCOME_UNKNOWN',
+    })
+    await expect(dialer.saveOutcome({ outcomeId: 'o-callback' })).rejects.toMatchObject({
+      code: 'NOTE_REQUIRED',
+    })
+    await expect(
+      dialer.saveOutcome({ callId: 'call-nope', outcomeId: 'o-meeting' })
+    ).rejects.toMatchObject({ code: 'NO_CALL_TO_SAVE', message: 'Call not found' })
+
+    seen.length = 0
+    expect(
+      await dialer.saveOutcome({ outcomeValue: 'Meeting booked', note: 'Friday 10:00' })
+    ).toEqual({ callId, outcomeId: 'o-meeting' })
+    expect(seen).toEqual([
+      [
+        'call.completed',
+        {
+          callId,
+          externalId: 'case-9',
+          prospectId: 'p-1004',
+          outcomeId: 'o-meeting',
+          outcome: 'Meeting booked',
+          disposition: 'Meeting booked',
+          dispositionGroup: 'answered',
+          note: 'Friday 10:00',
+          durationSeconds: postCall.durationSeconds,
+        },
+      ],
+    ])
+    expect((await dialer.getState()).call).toBeNull()
+
+    // Nothing waits now; an ended call can still be written to by id.
+    await expect(dialer.saveOutcome({ outcomeId: 'o-meeting' })).rejects.toMatchObject({
+      code: 'NO_CALL_TO_SAVE',
+    })
+    expect(await dialer.saveOutcome({ callId, note: 'Moved to Monday' })).toEqual({
+      callId,
+      outcomeId: null,
+    })
+    expect(names()).toEqual(['call.completed'])
+
+    // A session's call is saved with session.saveOutcome.
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(2100)
+    await dialer.hangUp()
+    const sessionCall = last('session.postCall')
+    await expect(
+      dialer.saveOutcome({ callId: sessionCall.callId, outcomeId: 'o-meeting' })
+    ).rejects.toMatchObject({
+      code: 'NO_CALL_TO_SAVE',
+      message: "This is the power-dial session's call; save it with session.saveOutcome.",
+    })
+  })
+
+  it('"Require & block dialer": the next dial waits for the outcome, and a reload brings the call back', async () => {
+    const { dialer, stub, mounting } = await mountOnStub({ query: 'blockDialer=1' })
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    const { callId } = await dialer.dial({ prospectId: 'p-1004' })
+    await vi.advanceTimersByTimeAsync(2000)
+    await dialer.hangUp()
+    expect(stub.sentOfType('symbo:call.postCall').at(-1)).toMatchObject({
+      callId,
+      blocksDialing: true,
+      restored: false,
+    })
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'POSTCALL_DETAILS_REQUIRED' })
+    await expect(dialer.signOut()).rejects.toMatchObject({ code: 'POSTCALL_DETAILS_REQUIRED' })
+
+    // Compact mode reloads all the same: the reloaded frame brings the call back.
+    expect(await dialer.reload()).toEqual({ reloading: true })
+    await vi.advanceTimersByTimeAsync(300)
+    expect(stub.reloads).toHaveLength(1)
+
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+    loadStub(env, dialer, { mode: 'compact', query: 'blockDialer=1', storage: stub.storage })
+    dialer.iframe.dispatch('load')
+    expect(seen.map(([n]) => n).slice(0, 4)).toEqual(['frame.reloaded', 'ready', 'resize', 'call.postCall'])
+    expect(seen[0][1]).toEqual({ requested: true, reason: null })
+    const restored = seen[3][1]
+    expect(restored).toMatchObject({
+      callId,
+      prospectId: 'p-1004',
+      answered: true,
+      outcomeRequired: true,
+      blocksDialing: true,
+      restored: true,
+    })
+    expect(Number.isNaN(Date.parse(restored.dialedAt))).toBe(false)
+    expect((await dialer.getState()).call).toMatchObject({
+      callId,
+      status: 'post_call',
+      restored: true,
+      dialedAt: restored.dialedAt,
+    })
+
+    await vi.advanceTimersByTimeAsync(300)
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'POSTCALL_DETAILS_REQUIRED' })
+    await dialer.saveOutcome({ outcomeId: 'o-connected' })
+    expect(seen.map(([n]) => n)).toContain('call.completed')
+    expect((await dialer.dial({ number: '+12125550123' })).callId).toBeTruthy()
+  })
+
+  it('"Require & block dialer": a session call waiting for its outcome comes back after a reload, like a one-off', async () => {
+    const { dialer, stub, mounting } = await mountOnStub({ query: 'blockDialer=1' })
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(2500)
+    await dialer.hangUp()
+    const { callId } = stub.sentOfType('symbo:session.postCall').at(-1)
+
+    // The page reloads the frame with the session loaded.
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+    loadStub(env, dialer, { mode: 'compact', query: 'blockDialer=1', storage: stub.storage })
+    dialer.iframe.dispatch('load')
+    expect(seen.map(([n]) => n).slice(0, 4)).toEqual(['frame.reloaded', 'ready', 'resize', 'call.postCall'])
+    expect(seen[3][1]).toMatchObject({
+      callId,
+      prospectId: 'p-1002',
+      answered: true,
+      blocksDialing: true,
+      restored: true,
+    })
+    expect(Number.isNaN(Date.parse(seen[3][1].dialedAt))).toBe(false)
+    expect((await dialer.getState()).call).toMatchObject({ callId, status: 'post_call', restored: true })
+
+    await vi.advanceTimersByTimeAsync(300)
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'POSTCALL_DETAILS_REQUIRED' })
+    await dialer.saveOutcome({ callId, outcomeId: 'o-connected' })
+    expect(seen.map(([n]) => n)).toContain('call.completed')
+    expect(stub.storage.has('symbo-stub:pendingCall')).toBe(false)
+  })
+
+  it('"Require & block dialer" in widget mode: reload waits for the outcome as well', async () => {
+    const { dialer, mounting } = await mountOnStub({ mode: 'widget', query: 'blockDialer=1' })
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    await dialer.dial({ prospectId: 'p-1004' })
+    await dialer.hangUp()
+    await expect(dialer.reload()).rejects.toMatchObject({ code: 'POSTCALL_DETAILS_REQUIRED' })
+  })
+
+  /* ------------------------------------------------------------ the queue */
+
+  it('removes a list of queued calls, leaving the ones being dialed', async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    expect(dialer.hasCapability('removeQueuedCalls')).toBe(true)
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(500)
+
+    seen.length = 0
+    expect(await dialer.session.removeQueued(['Q-2', 'q-3', 'q-nope', 'Q-3'])).toEqual({
+      removedCount: 1,
+      skipped: [{ queuedCallId: 'q-2', reason: 'dialing' }],
+    })
+    expect(names()).toEqual(['session.queue.updated'])
+    expect(await dialer.session.removeQueued({ queuedCallIds: ['q-3', 'q-4'] })).toEqual({
+      removedCount: 1,
+      skipped: [],
+    })
+    await expect(dialer.session.removeQueued('q-3')).rejects.toMatchObject({
+      code: 'QUEUED_CALL_NOT_FOUND',
+      message: 'This call is no longer queued',
+    })
+    await expect(dialer.session.removeQueued('q-1')).rejects.toMatchObject({
+      code: 'QUEUED_CALL_DIALING',
+    })
+    const { counts } = await dialer.session.getQueue()
+    expect(counts).toMatchObject({ dialing: 2, removed: 2, queued: 2 })
+  })
+
+  it('ends only the session loaded here; another is ended from the partner server', async () => {
+    const { dialer, seen, names } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
+    seen.length = 0
+
+    // The SDK never sends an id; the frame refuses one a page posts itself.
+    await expect(dialer.session.end({ dialSessionId: 'ds-other' })).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+    })
+    await expect(dialer.send('symbo:session.end', { dialSessionId: 'ds-other' })).rejects.toMatchObject({
+      code: 'SESSION_NOT_FOUND',
+      message:
+        'Only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.',
+    })
+    expect(names()).toEqual([])
+    expect((await dialer.getState()).session.dialSessionId).toBe('ds-demo')
+
+    // The loaded session's own id ends it like end() does.
+    await dialer.send('symbo:session.end', { dialSessionId: 'ds-demo' })
+    expect(names()).toEqual(['session.ended'])
+  })
+
+  /* --------------------------------------------------- the calling device */
+
+  it('waits for the calling device before dialing', async () => {
+    const { dialer, mounting } = await mountOnStub()
+    await mounting
+    expect(dialer.deviceReady).toBe(false)
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+
+    const dialing = dialer.dial({ number: '+12125550123' })
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({
+      code: 'CALL_IN_PROGRESS',
+      message: 'A dial is already being placed.',
+    })
+    expect(seen).toEqual([])
+    await vi.advanceTimersByTimeAsync(300)
+    const { callId } = await dialing
+    expect(seen.map(([n]) => n).slice(0, 2)).toEqual(['device.ready', 'call.started'])
+    expect(seen[1][1].callId).toBe(callId)
+  })
+
+  it('starts a session before the device has registered', async () => {
+    const { dialer, mounting } = await mountOnStub()
+    await mounting
+    expect(dialer.deviceReady).toBe(false)
+    expect((await dialer.session.start({ dialSessionId: 'ds-demo' })).dialing).toBe(true)
+    expect(dialer.warnings.has('DEVICE_NOT_READY')).toBe(false)
+  })
+
+  it('will not dial a session while a dial() is still being placed', async () => {
+    const { dialer, mounting } = await mountOnStub()
+    await mounting
+    const dialing = dialer.dial({ number: '+12125550123' })
+    const pending = { code: 'CALL_IN_PROGRESS', message: 'A dial is already being placed.' }
+    await expect(dialer.session.start({ dialSessionId: 'ds-demo' })).rejects.toMatchObject(pending)
+
+    // Loading without dialing leaves the line alone; resuming it is refused alike.
+    expect((await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })).dialing).toBe(false)
+    await expect(dialer.session.resume()).rejects.toMatchObject(pending)
+
+    await vi.advanceTimersByTimeAsync(300)
+    expect((await dialing).callId).toBeTruthy()
+    expect((await dialer.getState()).session.status).toBe('paused')
+  })
+
+  /* ------------------------------------------------- reloads nobody asked for */
+
+  it('announces a plan change, and reloads by itself once the rep is free', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
+    stub.poke('stub:planChanged')
+    expect(last('reload.required')).toEqual({ reason: 'plan_changed' })
+    expect(dialer.reloadRequired).toBe('plan_changed')
+    expect((await dialer.getState()).reloadRequired).toBe('plan_changed')
+
+    // A session is loaded: nothing happens until it is over.
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(names()).not.toContain('frame.leaving')
+    expect(stub.reloads).toHaveLength(0)
+
+    await dialer.session.hold()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(last('frame.leaving')).toEqual({ reason: 'plan_changed', inMs: 1000 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(stub.reloads).toHaveLength(1)
+
+    // The reloaded frame: the page hears why.
+    seen.length = 0
+    loadStub(env, dialer, { mode: 'compact', storage: stub.storage })
+    dialer.iframe.dispatch('load')
+    expect(seen[0]).toEqual(['frame.reloaded', { requested: false, reason: 'plan_changed' }])
+    expect(seen[1][0]).toBe('ready')
+    expect(seen[1][1].reloadReason).toBe('plan_changed')
+    expect(dialer.reloadRequired).toBeNull()
+  })
+
+  it('follows a sign-out in another frame once the call is over, and says why', async () => {
+    const { dialer, stub, seen, names, last } = await readyOnStub()
+    await dialer.dial({ prospectId: 'p-1004' })
+    stub.poke('stub:signOut')
+    expect(dialer.warnings.has('SIGNED_OUT_ELSEWHERE')).toBe(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(names()).not.toContain('frame.leaving')
+
+    await dialer.hangUp()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(last('frame.leaving')).toEqual({ reason: 'signed_out_elsewhere', inMs: 600 })
+    expect(stub.reloads).toHaveLength(1)
+    expect(stub.storage.has('symbo-stub:signedIn')).toBe(false)
+
+    seen.length = 0
+    loadStub(env, dialer, { mode: 'compact', storage: stub.storage })
+    dialer.iframe.dispatch('load')
+    expect(last('frame.reloaded')).toEqual({ requested: false, reason: 'signed_out_elsewhere' })
+    expect(last('auth.required')).toMatchObject({ reloadReason: 'signed_out_elsewhere' })
+  })
+
+  it('does not follow a sign-out in another frame while a dial() is being placed', async () => {
+    const { dialer, stub, mounting } = await mountOnStub()
+    await mounting
+    const seen = []
+    dialer.on('*', (name) => seen.push(name))
+    const dialing = dialer.dial({ number: '+12125550123' })
+    stub.poke('stub:signOut')
+    expect(dialer.warnings.has('SIGNED_OUT_ELSEWHERE')).toBe(true)
+    expect(seen).not.toContain('frame.leaving')
+
+    await vi.advanceTimersByTimeAsync(300)
+    await dialing
+    await dialer.hangUp()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(seen).toContain('frame.leaving')
+    expect(stub.storage.has('symbo-stub:signedIn')).toBe(false)
+  })
+
+  it('does not reload for a plan change while a dial() is being placed', async () => {
+    const { dialer, stub, mounting } = await mountOnStub()
+    await mounting
+    const seen = []
+    dialer.on('*', (name) => seen.push(name))
+    const dialing = dialer.dial({ number: '+12125550123' })
+    stub.poke('stub:planChanged')
+    expect(seen).toContain('reload.required')
+    expect(seen).not.toContain('frame.leaving')
+
+    await vi.advanceTimersByTimeAsync(300)
+    await dialing
+    expect(seen).not.toContain('frame.leaving')
+    await dialer.hangUp()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(seen).toContain('frame.leaving')
+  })
+
+  it('carries out nothing once it has said frame.leaving for a plan change, but answers reload', async () => {
+    const { dialer, stub, names, last } = await readyOnStub()
+    stub.poke('stub:planChanged')
+    expect(last('frame.leaving')).toEqual({ reason: 'plan_changed', inMs: 1000 })
+
+    await expect(dialer.dial({ number: '+12125550123' })).rejects.toMatchObject({
+      code: 'NOT_SIGNED_IN',
+      message: 'The frame is reloading.',
+    })
+    await expect(dialer.signOut()).rejects.toMatchObject({ code: 'NOT_SIGNED_IN' })
+    stub.poke('stub:ringInbound')
+    expect(names()).not.toContain('call.incoming')
+    expect(await dialer.reload()).toEqual({ reloading: true })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(stub.reloads).toHaveLength(1)
+  })
+
+  it('carries out nothing once it has said frame.leaving for a sign-out, but answers signOut', async () => {
+    const { dialer, stub, last } = await readyOnStub()
+    stub.poke('stub:signOut')
+    expect(last('frame.leaving')).toEqual({ reason: 'signed_out_elsewhere', inMs: 600 })
+
+    await expect(dialer.dial({ number: '+12125550123' })).rejects.toMatchObject({
+      code: 'NOT_SIGNED_IN',
+      message: 'The rep is being signed out.',
+    })
+    await expect(dialer.reload()).rejects.toMatchObject({ code: 'NOT_SIGNED_IN' })
+    expect(await dialer.signOut()).toEqual({ signedOut: true })
+    await vi.advanceTimersByTimeAsync(600)
     expect(stub.reloads).toHaveLength(1)
   })
 })

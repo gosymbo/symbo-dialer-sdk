@@ -47,6 +47,7 @@ export const COMMANDS = Object.freeze({
   SET_AUDIO_DEVICES: 'symbo:setAudioDevices',
   SET_MUTED: 'symbo:setMuted',
   SEND_DIGITS: 'symbo:sendDigits',
+  CALL_SAVE_OUTCOME: 'symbo:call.saveOutcome',
   SESSION_START: 'symbo:session.start',
   SESSION_PAUSE: 'symbo:session.pause',
   SESSION_RESUME: 'symbo:session.resume',
@@ -56,6 +57,7 @@ export const COMMANDS = Object.freeze({
   SESSION_GET_QUEUE: 'symbo:session.getQueue',
   SESSION_SAVE_OUTCOME: 'symbo:session.saveOutcome',
   SESSION_SET_CONCURRENT_CALLS: 'symbo:session.setConcurrentCalls',
+  SESSION_HOLD: 'symbo:session.hold',
 })
 
 // Symbo's answer to a command. Not a public event — it settles the promise the
@@ -85,6 +87,7 @@ export const EVENTS = Object.freeze({
   SESSION_PAUSED: 'symbo:session.paused',
   SESSION_RESUMED: 'symbo:session.resumed',
   SESSION_ENDED: 'symbo:session.ended',
+  SESSION_HELD: 'symbo:session.held',
   SESSION_NO_MORE_CALLS: 'symbo:session.noMoreCalls',
   SESSION_LEG_RINGING: 'symbo:session.leg.ringing',
   SESSION_LEG_ANSWERED: 'symbo:session.leg.answered',
@@ -95,13 +98,17 @@ export const EVENTS = Object.freeze({
   SESSION_ADMIN: 'symbo:session.admin',
   SESSION_CONCURRENT_CALLS_CHANGED: 'symbo:session.concurrentCallsChanged',
   UPDATE_AVAILABLE: 'symbo:update.available',
+  RELOAD_REQUIRED: 'symbo:reload.required',
+  FRAME_LEAVING: 'symbo:frame.leaving',
   RESIZE: 'symbo:resize',
   ERROR: 'symbo:error',
 })
 
 // Codes Symbo answers with. A refused command rejects with one of these on
 // `err.code`; the `error` event carries one for refusals that were not an
-// answer to anything.
+// answer to anything. A command that failed unexpectedly inside the frame is
+// answered with COMMAND_FAILED, which the frame keeps out of its own list, so
+// this one mirrors it and leaves it out too.
 export const ERRORS = Object.freeze({
   NOT_SIGNED_IN: 'NOT_SIGNED_IN',
   CALLING_NOT_ENABLED: 'CALLING_NOT_ENABLED',
@@ -161,8 +168,11 @@ export const WARNINGS = Object.freeze({
   REALTIME_DISCONNECTED: 'REALTIME_DISCONNECTED',
   DEVICE_NOT_READY: 'DEVICE_NOT_READY',
   DEVICE_ERROR: 'DEVICE_ERROR',
+  DEVICE_ENDPOINT_FAILED: 'DEVICE_ENDPOINT_FAILED',
+  SIGNED_OUT_ELSEWHERE: 'SIGNED_OUT_ELSEWHERE',
   MIC_PERMISSION_DENIED: 'MIC_PERMISSION_DENIED',
   EMBED_NOT_ENABLED: 'EMBED_NOT_ENABLED',
+  ORIGIN_NOT_ALLOWED: 'ORIGIN_NOT_ALLOWED',
   POWER_DIALING_NOT_ENABLED: 'POWER_DIALING_NOT_ENABLED',
   HIJACK_MODE: 'HIJACK_MODE',
 })
@@ -179,6 +189,7 @@ export const CLIENT_ERRORS = Object.freeze({
   NO_LOGIN_URL: 'NO_LOGIN_URL',
   POPUP_BLOCKED: 'POPUP_BLOCKED',
   FRAME_RELOADED: 'FRAME_RELOADED',
+  NOT_SUPPORTED: 'NOT_SUPPORTED',
   UNKNOWN: 'UNKNOWN',
 })
 
@@ -212,6 +223,9 @@ const isConcurrentCalls = (value) =>
   value <= MAX_CONCURRENT_CALLS
 const CONCURRENT_CALLS_RULE = `a whole number of lines from ${MIN_CONCURRENT_CALLS} to ${MAX_CONCURRENT_CALLS}`
 
+// How many queued calls one session.removeQueued list may name.
+const MAX_QUEUED_CALL_IDS = 1000
+
 // Keypad digits one sendDigits may carry: 0-9, * and #, up to 32 of them.
 const DTMF_DIGITS = /^[0-9*#]{1,32}$/
 
@@ -231,7 +245,8 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 15000
 // promise rejects with COMMAND_TIMEOUT, the frame's answer arrives to a
 // pending entry that is already gone, and the partner has a live call with no
 // callId. Keep this above the frame's own wait for the call id; the two move
-// together.
+// together. A frame that first waits for its calling device to register
+// shortens its wait for the call id by that time, so it stays inside this.
 const DIAL_TIMEOUT_MS = 25000
 
 // signIn, likewise: the frame can hold it up to 8 s while it checks a session
@@ -277,6 +292,14 @@ const isElement = (value) =>
   !!value && typeof value === 'object' && typeof value.appendChild === 'function'
 
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value)
+
+const isNonEmptyString = (value) => typeof value === 'string' && value !== ''
+
+const notSupported = (what, capability) =>
+  new SymboDialerError(
+    CLIENT_ERRORS.NOT_SUPPORTED,
+    `This Symbo release does not support ${what}; check dialer.hasCapability('${capability}').`
+  )
 
 let warnedAboutHiddenOption = false
 
@@ -354,6 +377,14 @@ class SymboDialerClient {
     // created, which may already have answered.
     this.frameLoads = 0
     this.warnings = new Map()
+    // The rep's session the frame could pick up, from `ready` and getState();
+    // null while one is loaded.
+    this.resumableSession = null
+    // Why the frame needs to reload (reload.required); it reloads by itself
+    // once nothing would be cut off.
+    this.reloadRequired = null
+    // What the last frame.leaving said, for the frame.reloaded that follows.
+    this.leavingReason = null
 
     this.handleMessage = this.handleMessage.bind(this)
 
@@ -371,6 +402,17 @@ class SymboDialerClient {
           }
           payload.concurrentCalls = options.concurrentCalls
         }
+        if (options.dial !== undefined) {
+          if (typeof options.dial !== 'boolean') {
+            return Promise.reject(invalid("session.start's dial must be true or false."))
+          }
+          // An older frame ignores dial: false and starts dialing.
+          if (!options.dial) {
+            const refused = this.unsupported('sessionLoad', 'session.start({ dial: false })')
+            if (refused) return refused
+          }
+          payload.dial = options.dial
+        }
         return this.send(COMMANDS.SESSION_START, payload).then((result) => {
           if (isFiniteNumber(result?.concurrentCalls)) {
             this.concurrentCalls = result.concurrentCalls
@@ -380,10 +422,43 @@ class SymboDialerClient {
       },
       pause: () => this.send(COMMANDS.SESSION_PAUSE),
       resume: () => this.send(COMMANDS.SESSION_RESUME),
-      end: (options = {}) =>
-        this.send(COMMANDS.SESSION_END, { force: !!options.force }),
+      // Park the session without ending it; session.start picks it up again.
+      hold: () => this.send(COMMANDS.SESSION_HOLD),
+      end: (options = {}) => {
+        // Never sent: an older frame ignores the id and ends the loaded session.
+        if (options.dialSessionId !== undefined) {
+          return Promise.reject(
+            invalid(
+              'session.end takes no dialSessionId: only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.'
+            )
+          )
+        }
+        return this.send(COMMANDS.SESSION_END, { force: !!options.force })
+      },
       skipCurrent: () => this.send(COMMANDS.SESSION_SKIP_CURRENT),
+      // One id resolves {}; a list resolves { removedCount, skipped }, where
+      // skipped names the calls left alone because they are being dialed.
       removeQueued: (arg) => {
+        const queuedCallIds = Array.isArray(arg) ? arg : arg?.queuedCallIds
+        if (queuedCallIds !== undefined) {
+          if (
+            !Array.isArray(queuedCallIds) ||
+            queuedCallIds.length < 1 ||
+            queuedCallIds.length > MAX_QUEUED_CALL_IDS ||
+            !queuedCallIds.every(isNonEmptyString)
+          ) {
+            return Promise.reject(
+              invalid(
+                `session.removeQueued needs 1 to ${MAX_QUEUED_CALL_IDS} queuedCallIds, each a non-empty string.`
+              )
+            )
+          }
+          const refused = this.unsupported('removeQueuedCalls', 'removing a list of queued calls')
+          if (refused) return refused
+          return this.send(COMMANDS.SESSION_REMOVE_QUEUED, {
+            queuedCallIds: [...queuedCallIds],
+          })
+        }
         const queuedCallId =
           arg && typeof arg === 'object' ? arg.queuedCallId : arg
         if (!queuedCallId) {
@@ -613,6 +688,8 @@ class SymboDialerClient {
     this.updateAvailable = payload.updateAvailable === true
     this.deviceReady = !!payload.deviceReady
     this.powerDialing = !!payload.powerDialing
+    this.resumableSession = payload.resumableSession ?? null
+    this.leavingReason = null
 
     // Older frames size themselves on ready rather than through resize.
     if (payload.sizeInfo) this.applySize(payload.sizeInfo)
@@ -744,6 +821,7 @@ class SymboDialerClient {
         break
       case 'session.started':
       case 'session.concurrentCallsChanged':
+        if (name === 'session.started') this.resumableSession = null
         if (isFiniteNumber(payload.concurrentCalls)) {
           this.concurrentCalls = payload.concurrentCalls
         }
@@ -758,9 +836,16 @@ class SymboDialerClient {
         if (typeof payload.muted === 'boolean') this.muted = payload.muted
         break
       case 'session.ended':
+      case 'session.held':
         // With no session running, the count is what a new one gets when
         // nobody sets it: the lock, which it already holds, or one line.
         if (!this.concurrentCallsLocked) this.concurrentCalls = MIN_CONCURRENT_CALLS
+        break
+      case 'reload.required':
+        this.reloadRequired = payload.reason ?? null
+        break
+      case 'frame.leaving':
+        this.leavingReason = payload.reason ?? null
         break
       default:
         break
@@ -876,7 +961,8 @@ class SymboDialerClient {
    *
    * The frame waits up to 15 s for that id, so this is the one command
    * `commandTimeoutMs` does not shorten: a small one would time out calls
-   * that are really ringing.
+   * that are really ringing. While a power-dial session is paused with the
+   * rep's line down, this places an ordinary call.
    */
   dial(options = {}) {
     if (!options.number && !options.prospectId) {
@@ -898,12 +984,52 @@ class SymboDialerClient {
   getState() {
     return this.send(COMMANDS.GET_STATE).then((state) => {
       if (typeof state?.muted === 'boolean') this.muted = state.muted
+      if (state?.resumableSession !== undefined) {
+        this.resumableSession = state.resumableSession
+      }
       return state
     })
   }
 
-  answerIncoming() {
-    return this.send(COMMANDS.ANSWER_INCOMING)
+  /**
+   * Answer the inbound call that is ringing. `{ endCurrent: true }` first
+   * ends the call the rep is on, as Symbo's "End & Accept" does; without it
+   * a call in front of the rep is refused.
+   */
+  answerIncoming(options = {}) {
+    const endCurrent = options?.endCurrent
+    if (endCurrent !== undefined && typeof endCurrent !== 'boolean') {
+      return Promise.reject(invalid("answerIncoming's endCurrent must be true or false."))
+    }
+    return this.send(COMMANDS.ANSWER_INCOMING, endCurrent ? { endCurrent: true } : {})
+  }
+
+  /**
+   * Save the outcome, note or call fields of a call: the one waiting in its
+   * post-call step, or the call `callId` names, including a session call the
+   * frame no longer holds (after a hold or a reload). Resolves with
+   * `{ callId, outcomeId }`; `call.completed` follows for the call that was
+   * waiting. A session call in front of the rep is saved with
+   * session.saveOutcome.
+   */
+  saveOutcome(options = {}) {
+    const given = (key) => options[key] !== undefined && options[key] !== null
+    if (!['outcomeId', 'outcomeValue', 'note', 'callFields'].some(given)) {
+      return Promise.reject(
+        invalid('saveOutcome needs an outcomeId or outcomeValue, a note, or callFields.')
+      )
+    }
+    if (
+      given('callFields') &&
+      (typeof options.callFields !== 'object' || Array.isArray(options.callFields))
+    ) {
+      return Promise.reject(invalid("saveOutcome's callFields must be an object."))
+    }
+    const payload = {}
+    for (const key of ['callId', 'outcomeId', 'outcomeValue', 'note', 'callFields']) {
+      if (options[key] !== undefined) payload[key] = options[key]
+    }
+    return this.send(COMMANDS.CALL_SAVE_OUTCOME, payload)
   }
 
   ignoreIncoming() {
@@ -915,9 +1041,10 @@ class SymboDialerClient {
    * are on. Resolves with `{ muted }`; `call.muteChanged` follows when that
    * changed anything. Mute lasts as long as the rep's line, as in Symbo: in a
    * power-dial session that line can outlast a conversation, and drops when
-   * the rep hangs up or pauses. Refused with
-   * NO_ACTIVE_CALL while the rep's line is down. Check `hasCapability('mute')`
-   * against an older Symbo release, which answers UNKNOWN_COMMAND.
+   * the rep hangs up, pauses (unless a contact is on the line) or holds, or
+   * the session ends. Refused with NO_ACTIVE_CALL while the rep's line is
+   * down. Check `hasCapability('mute')` against an older Symbo release, which
+   * answers UNKNOWN_COMMAND.
    */
   setMuted(arg) {
     const muted = arg && typeof arg === 'object' ? arg.muted : arg
@@ -1007,7 +1134,8 @@ class SymboDialerClient {
    * in: `signIn()` while someone is signed in answers with them rather than
    * switching. Resolves with `{ signedOut }` — false when nobody was signed
    * in. The frame then reloads signed out and says `auth.required`. Refused
-   * with SESSION_ACTIVE while a power-dial session runs, CALL_IN_PROGRESS
+   * with SESSION_ACTIVE while a power-dial session is loaded (hold or end it
+   * first), CALL_IN_PROGRESS
    * while a call is up or ringing, and POSTCALL_DETAILS_REQUIRED while the
    * last call's required outcome is unsaved. Check `hasCapability('signOut')`
    * against an older Symbo release, which answers UNKNOWN_COMMAND.
@@ -1026,10 +1154,16 @@ class SymboDialerClient {
    * `frame.reloaded { requested: true }` and a fresh `ready` follow. Refused,
    * like signOut, with SESSION_ACTIVE, CALL_IN_PROGRESS or
    * POSTCALL_DETAILS_REQUIRED while it would cut something off. Check
-   * `hasCapability('reload')` against an older Symbo release.
+   * `hasCapability('reload')` against an older Symbo release. `{ hard: true }`
+   * also fetches the Symbo build afresh, for a calling device that would not
+   * register; an older frame does a plain reload.
    */
-  reload() {
-    return this.send(COMMANDS.RELOAD).then((result) => {
+  reload(options = {}) {
+    const hard = options?.hard
+    if (hard !== undefined && typeof hard !== 'boolean') {
+      return Promise.reject(invalid("reload's hard must be true or false."))
+    }
+    return this.send(COMMANDS.RELOAD, hard ? { hard: true } : {}).then((result) => {
       if (result && result.reloading) {
         this.reloadRequested = true
         this.forgetFrame()
@@ -1050,6 +1184,8 @@ class SymboDialerClient {
     const ownLoad = this.frameLoads === 1 && !this.reloadRequested
     if (!ownLoad && (this.ready || this.reloadRequested)) {
       const requested = this.reloadRequested
+      // Read before forgetFrame() clears it. A reload asked for needs no reason.
+      const reason = requested ? null : this.leavingReason
       this.reloadRequested = false
       if (this.ready) this.forgetFrame()
       // The old document will never answer what it was asked.
@@ -1059,7 +1195,7 @@ class SymboDialerClient {
           'The dialer reloaded before answering. Send it again after "ready".'
         )
       )
-      this.emit('frame.reloaded', { requested })
+      this.emit('frame.reloaded', { requested, reason })
     }
     // The document a sign-in reloads into speaks for itself: if it says
     // auth.required, that is news, not a repeat of the one before.
@@ -1086,6 +1222,9 @@ class SymboDialerClient {
     this.concurrentCallsLocked = false
     this.updateAvailable = false
     this.deviceReady = false
+    this.resumableSession = null
+    this.reloadRequired = null
+    this.leavingReason = null
     // The reload dropped the rep's line, and with it any mute. Said, so a
     // mute button drawn from call.muteChanged does not stay pressed.
     if (this.muted) {
@@ -1151,6 +1290,16 @@ class SymboDialerClient {
 
   hasCapability(name) {
     return this.capabilities.includes(name)
+  }
+
+  // For an option an older frame would misread rather than refuse: a
+  // rejection when the ready frame lacks the capability, otherwise null.
+  // Before ready, send() answers NOT_READY instead. A frame without 'session'
+  // (a rep with no power dialing) answers every session command itself.
+  unsupported(capability, what) {
+    return this.ready && this.hasCapability('session') && !this.hasCapability(capability)
+      ? Promise.reject(notSupported(what, capability))
+      : null
   }
 
   destroy() {

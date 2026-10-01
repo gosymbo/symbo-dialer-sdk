@@ -16,10 +16,12 @@ const STUB_PATH = fileURLToPath(new URL('../../example/stub/dial/stub.js', impor
 const STUB_ORIGIN = 'http://localhost:3000'
 const PARTNER_ORIGIN = 'http://localhost:3000'
 
-export function loadStub(env, dialer, { signedIn = true, mode = 'compact', query = '' } = {}) {
+// `storage` carries the stub's localStorage over from an earlier load, to play
+// the document a reload brings.
+export function loadStub(env, dialer, { signedIn = true, mode = 'compact', query = '', storage: carried } = {}) {
   const iframe = dialer.iframe
   const stubListeners = []
-  const storage = new Map(signedIn ? [['symbo-stub:signedIn', '1']] : [])
+  const storage = carried ?? new Map(signedIn ? [['symbo-stub:signedIn', '1']] : [])
   const broadcast = []
   const reloads = []
   const opened = []

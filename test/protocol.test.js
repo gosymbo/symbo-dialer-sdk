@@ -30,9 +30,9 @@ const PROFILE_ID = 'profile-test-0001'
 // is silent: both sides keep working while a partner stops receiving an event
 // nobody noticed was renamed.
 //
-// So neither side is allowed to change quietly. This literal is duplicated in
-// the Symbo application and pinned by a contract test there. Editing the
-// protocol on either side fails that side's build until the literal is
+// So neither side is allowed to change quietly. The Symbo application declares
+// the same names in its embed protocol.js, which must stay identical to this
+// literal. Editing the protocol here fails this build until the literal is
 // updated, and updating the literal is the moment you are meant to remember
 // the other repository exists.
 //
@@ -57,6 +57,7 @@ const CONTRACT = Object.freeze({
     SET_AUDIO_DEVICES: 'symbo:setAudioDevices',
     SET_MUTED: 'symbo:setMuted',
     SEND_DIGITS: 'symbo:sendDigits',
+    CALL_SAVE_OUTCOME: 'symbo:call.saveOutcome',
     SESSION_START: 'symbo:session.start',
     SESSION_PAUSE: 'symbo:session.pause',
     SESSION_RESUME: 'symbo:session.resume',
@@ -66,6 +67,7 @@ const CONTRACT = Object.freeze({
     SESSION_GET_QUEUE: 'symbo:session.getQueue',
     SESSION_SAVE_OUTCOME: 'symbo:session.saveOutcome',
     SESSION_SET_CONCURRENT_CALLS: 'symbo:session.setConcurrentCalls',
+    SESSION_HOLD: 'symbo:session.hold',
   },
   events: {
     READY: 'symbo:ready',
@@ -89,6 +91,7 @@ const CONTRACT = Object.freeze({
     SESSION_PAUSED: 'symbo:session.paused',
     SESSION_RESUMED: 'symbo:session.resumed',
     SESSION_ENDED: 'symbo:session.ended',
+    SESSION_HELD: 'symbo:session.held',
     SESSION_NO_MORE_CALLS: 'symbo:session.noMoreCalls',
     SESSION_LEG_RINGING: 'symbo:session.leg.ringing',
     SESSION_LEG_ANSWERED: 'symbo:session.leg.answered',
@@ -99,6 +102,8 @@ const CONTRACT = Object.freeze({
     SESSION_ADMIN: 'symbo:session.admin',
     SESSION_CONCURRENT_CALLS_CHANGED: 'symbo:session.concurrentCallsChanged',
     UPDATE_AVAILABLE: 'symbo:update.available',
+    RELOAD_REQUIRED: 'symbo:reload.required',
+    FRAME_LEAVING: 'symbo:frame.leaving',
     RESIZE: 'symbo:resize',
     ERROR: 'symbo:error',
   },
@@ -156,8 +161,11 @@ const CONTRACT = Object.freeze({
     'REALTIME_DISCONNECTED',
     'DEVICE_NOT_READY',
     'DEVICE_ERROR',
+    'DEVICE_ENDPOINT_FAILED',
+    'SIGNED_OUT_ELSEWHERE',
     'MIC_PERMISSION_DENIED',
     'EMBED_NOT_ENABLED',
+    'ORIGIN_NOT_ALLOWED',
     'POWER_DIALING_NOT_ENABLED',
     'HIJACK_MODE',
   ],
@@ -827,7 +835,7 @@ describe('create and mount', () => {
 
     // The frame's document loads again without anyone asking.
     symbo.load()
-    expect(seen).toEqual([[{ requested: false }, false]])
+    expect(seen).toEqual([[{ requested: false, reason: null }, false]])
     expect(dialer.user).toBe(null)
 
     // It says ready again, and the page carries on.
@@ -996,7 +1004,7 @@ describe('create and mount', () => {
     expect(dialer.ready).toBe(false)
 
     symbo.load()
-    expect(reloaded).toHaveBeenCalledWith({ requested: true })
+    expect(reloaded).toHaveBeenCalledWith({ requested: true, reason: null })
     symbo.ready()
     expect(dialer.ready).toBe(true)
 
@@ -1317,6 +1325,23 @@ describe('commands settle on the answer', () => {
       code: 'CALL_IN_PROGRESS',
       message: 'A call is already active.',
     })
+  })
+
+  // The frame's answer to a command that failed unexpectedly. It is outside
+  // the contract's codes, so ERRORS leaves it out, but it must still arrive.
+  it('passes COMMAND_FAILED through though ERRORS does not list it', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const holding = dialer.session.hold()
+    symbo.refuse(
+      symbo.lastCommand().requestId,
+      'COMMAND_FAILED',
+      'Request failed with status code 500'
+    )
+    await expect(holding).rejects.toMatchObject({
+      code: 'COMMAND_FAILED',
+      message: 'Request failed with status code 500',
+    })
+    expect(ERRORS).not.toHaveProperty('COMMAND_FAILED')
   })
 
   it('falls back to UNKNOWN when a refusal names no code', async () => {
@@ -1936,5 +1961,435 @@ describe('session, inbound, audio and state API', () => {
       'audio.devicesChanged',
       'error',
     ])
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+
+describe('calls during a session, hold, one-off outcomes and reloads', () => {
+  let env
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    env = installFakeDom()
+  })
+
+  afterEach(() => {
+    env.uninstall()
+    vi.useRealTimers()
+  })
+
+  const roundTrip = async (symbo, promise, expectedType, expectedPayload, data) => {
+    const sent = symbo.lastCommand()
+    expect(sent.type).toBe(expectedType)
+    expect(sent.payload).toEqual(expectedPayload)
+    symbo.answer(sent.requestId, data)
+    expect(await promise).toEqual(data)
+  }
+
+  // The capabilities a frame with this release advertises to a rep who can
+  // power dial.
+  const CURRENT = [
+    'session',
+    'inbound',
+    'audioDevices',
+    'signIn',
+    'callsWhilePaused',
+    'sessionHold',
+    'sessionLoad',
+    'removeQueuedCalls',
+    'callWaiting',
+    'saveOutcome',
+    'hardReload',
+  ]
+  const currentDialer = async () => {
+    const ready = await readyDialer(env, SymboDialer)
+    ready.symbo.ready({ capabilities: CURRENT })
+    return ready
+  }
+
+  it('session.hold: posts the command and resets the line count on session.held', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    symbo.event('symbo:session.started', { dialSessionId: 'ds-1', concurrentCalls: 3 })
+    const held = vi.fn()
+    dialer.on('session.held', (payload) => held(payload, dialer.concurrentCalls))
+
+    const counts = { queued: 4, remaining: 4 }
+    await roundTrip(
+      symbo,
+      dialer.session.hold(),
+      COMMANDS.SESSION_HOLD,
+      {},
+      { dialSessionId: 'ds-1', counts }
+    )
+    symbo.event('symbo:session.held', { dialSessionId: 'ds-1', counts })
+    expect(held).toHaveBeenCalledWith({ dialSessionId: 'ds-1', counts }, 1)
+  })
+
+  it('session.start({ dial: false }) loads without dialing, where the frame supports it', async () => {
+    const { dialer, symbo } = await currentDialer()
+    await roundTrip(
+      symbo,
+      dialer.session.start({ dialSessionId: 'ds-1', dial: false }),
+      COMMANDS.SESSION_START,
+      { dialSessionId: 'ds-1', dial: false },
+      { dialSessionId: 'ds-1', concurrentCalls: 2, concurrentCallsLocked: false, dialing: false }
+    )
+    await roundTrip(
+      symbo,
+      dialer.session.start({ dialSessionId: 'ds-2', dial: true }),
+      COMMANDS.SESSION_START,
+      { dialSessionId: 'ds-2', dial: true },
+      { dialSessionId: 'ds-2', concurrentCalls: 2, concurrentCallsLocked: false, dialing: true }
+    )
+  })
+
+  it('refuses dial: false locally on a frame without sessionLoad, which would dial at once', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const before = symbo.posted().length
+
+    const refused = dialer.session.start({ dialSessionId: 'ds-1', dial: false })
+    await expect(refused).rejects.toMatchObject({
+      code: CLIENT_ERRORS.NOT_SUPPORTED,
+      message:
+        "This Symbo release does not support session.start({ dial: false }); check dialer.hasCapability('sessionLoad').",
+    })
+    await expect(refused).rejects.toBeInstanceOf(SymboDialerError)
+    await expect(
+      dialer.session.start({ dialSessionId: 'ds-1', dial: 'no' })
+    ).rejects.toMatchObject({ code: CLIENT_ERRORS.INVALID_OPTIONS })
+    expect(symbo.posted().length).toBe(before)
+
+    // dial: true means what an older frame already does.
+    dialer.session.start({ dialSessionId: 'ds-1', dial: true })
+    expect(symbo.lastCommand().payload).toEqual({ dialSessionId: 'ds-1', dial: true })
+  })
+
+  it('refuses session.end({ dialSessionId }) locally, which an older frame would read as ending the loaded session', async () => {
+    for (const ready of [currentDialer, () => readyDialer(env, SymboDialer)]) {
+      const { dialer, symbo } = await ready()
+      const before = symbo.posted().length
+      for (const id of ['ds-other', '', null]) {
+        await expect(dialer.session.end({ dialSessionId: id })).rejects.toMatchObject({
+          code: CLIENT_ERRORS.INVALID_OPTIONS,
+          message:
+            'session.end takes no dialSessionId: only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.',
+        })
+      }
+      expect(symbo.posted().length).toBe(before)
+
+      dialer.session.end({ force: true })
+      expect(symbo.lastCommand().payload).toEqual({ force: true })
+    }
+  })
+
+  it('session.removeQueued takes a list, and answers how many were removed and which were skipped', async () => {
+    const { dialer, symbo } = await currentDialer()
+    const result = {
+      removedCount: 2,
+      skipped: [{ queuedCallId: 'q-2', reason: 'dialing' }],
+    }
+    await roundTrip(
+      symbo,
+      dialer.session.removeQueued(['q-1', 'q-2', 'q-3', 'q-9']),
+      COMMANDS.SESSION_REMOVE_QUEUED,
+      { queuedCallIds: ['q-1', 'q-2', 'q-3', 'q-9'] },
+      result
+    )
+    await roundTrip(
+      symbo,
+      dialer.session.removeQueued({ queuedCallIds: ['q-4'] }),
+      COMMANDS.SESSION_REMOVE_QUEUED,
+      { queuedCallIds: ['q-4'] },
+      { removedCount: 1, skipped: [] }
+    )
+    // The single form is unchanged.
+    await roundTrip(
+      symbo,
+      dialer.session.removeQueued('q-5'),
+      COMMANDS.SESSION_REMOVE_QUEUED,
+      { queuedCallId: 'q-5' },
+      {}
+    )
+
+    const before = symbo.posted().length
+    const tooMany = Array.from({ length: 1001 }, (_, i) => `q-${i}`)
+    for (const bad of [[], ['q-1', ''], ['q-1', 7], tooMany, { queuedCallIds: 'q-1' }, { queuedCallIds: [] }]) {
+      await expect(dialer.session.removeQueued(bad)).rejects.toMatchObject({
+        code: CLIENT_ERRORS.INVALID_OPTIONS,
+      })
+    }
+    expect(symbo.posted().length).toBe(before)
+
+    // 1000 is allowed.
+    dialer.session.removeQueued(tooMany.slice(0, 1000))
+    expect(symbo.lastCommand().payload.queuedCallIds).toHaveLength(1000)
+  })
+
+  it('refuses a list removal locally on a frame without removeQueuedCalls', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const before = symbo.posted().length
+    await expect(dialer.session.removeQueued(['q-1'])).rejects.toMatchObject({
+      code: CLIENT_ERRORS.NOT_SUPPORTED,
+    })
+    await expect(dialer.session.removeQueued({ queuedCallIds: ['q-1'] })).rejects.toMatchObject({
+      code: CLIENT_ERRORS.NOT_SUPPORTED,
+    })
+    expect(symbo.posted().length).toBe(before)
+  })
+
+  it('sends these options to a frame without sessions, which answers them itself', async () => {
+    // A rep without power dialing: the frame drops every session capability,
+    // so a missing one says nothing about the release.
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    symbo.ready({ capabilities: ['inbound', 'audioDevices', 'signIn'], powerDialing: false })
+
+    const start = dialer.session.start({ dialSessionId: 'ds-1', dial: false })
+    let sent = symbo.lastCommand()
+    expect(sent).toMatchObject({ type: COMMANDS.SESSION_START, payload: { dialSessionId: 'ds-1', dial: false } })
+    symbo.refuse(sent.requestId, ERRORS.POWER_DIALING_NOT_ENABLED, 'Power dialing is not enabled')
+    await expect(start).rejects.toMatchObject({ code: ERRORS.POWER_DIALING_NOT_ENABLED })
+
+    const removal = dialer.session.removeQueued(['q-1'])
+    sent = symbo.lastCommand()
+    expect(sent).toMatchObject({ type: COMMANDS.SESSION_REMOVE_QUEUED, payload: { queuedCallIds: ['q-1'] } })
+    symbo.refuse(sent.requestId, ERRORS.NO_ACTIVE_SESSION, 'No dial session is loaded')
+    await expect(removal).rejects.toMatchObject({ code: ERRORS.NO_ACTIVE_SESSION })
+  })
+
+  it('answers NOT_READY rather than NOT_SUPPORTED before the frame has said what it supports', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
+    dialer.mount().catch(() => {})
+    fakeSymbo(env, dialer).load()
+    await expect(
+      dialer.session.start({ dialSessionId: 'ds-1', dial: false })
+    ).rejects.toMatchObject({ code: CLIENT_ERRORS.NOT_READY })
+    await expect(dialer.session.removeQueued(['q-1'])).rejects.toMatchObject({
+      code: CLIENT_ERRORS.NOT_READY,
+    })
+    dialer.destroy()
+  })
+
+  it('answerIncoming({ endCurrent }) sends endCurrent only when it is true', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    await roundTrip(
+      symbo,
+      dialer.answerIncoming({ endCurrent: true }),
+      COMMANDS.ANSWER_INCOMING,
+      { endCurrent: true },
+      { callId: 'c-in' }
+    )
+    await roundTrip(
+      symbo,
+      dialer.answerIncoming({ endCurrent: false }),
+      COMMANDS.ANSWER_INCOMING,
+      {},
+      { callId: 'c-in' }
+    )
+
+    const before = symbo.posted().length
+    await expect(dialer.answerIncoming({ endCurrent: 'yes' })).rejects.toMatchObject({
+      code: CLIENT_ERRORS.INVALID_OPTIONS,
+    })
+    expect(symbo.posted().length).toBe(before)
+
+    // An older frame does not know endCurrent and refuses with a call up, so
+    // there is nothing to gate.
+    const answering = dialer.answerIncoming({ endCurrent: true })
+    symbo.refuse(symbo.lastCommand().requestId, ERRORS.SESSION_ACTIVE, 'A power-dial session is active.')
+    await expect(answering).rejects.toMatchObject({ code: ERRORS.SESSION_ACTIVE })
+  })
+
+  it('saveOutcome saves a one-off call, sending only the keys given', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    await roundTrip(
+      symbo,
+      dialer.saveOutcome({ outcomeId: 'o-1' }),
+      COMMANDS.CALL_SAVE_OUTCOME,
+      { outcomeId: 'o-1' },
+      { callId: 'c-1', outcomeId: 'o-1' }
+    )
+    const full = {
+      callId: 'c-2',
+      outcomeValue: 'MEETING_BOOKED',
+      note: 'Friday 10:00',
+      callFields: { c_meeting_at: '2026-10-02T10:00:00Z' },
+    }
+    await roundTrip(
+      symbo,
+      dialer.saveOutcome(full),
+      COMMANDS.CALL_SAVE_OUTCOME,
+      full,
+      { callId: 'c-2', outcomeId: 'o-2' }
+    )
+    // A note alone, or call fields alone, is something to write.
+    await roundTrip(symbo, dialer.saveOutcome({ note: '' }), COMMANDS.CALL_SAVE_OUTCOME, { note: '' }, { callId: 'c-1', outcomeId: null })
+    await roundTrip(
+      symbo,
+      dialer.saveOutcome({ callFields: {} }),
+      COMMANDS.CALL_SAVE_OUTCOME,
+      { callFields: {} },
+      { callId: 'c-1', outcomeId: null }
+    )
+
+    const before = symbo.posted().length
+    for (const bad of [
+      undefined,
+      {},
+      { callId: 'c-1' },
+      { outcomeId: null, note: null },
+      { outcomeId: 'o-1', callFields: 'x' },
+      { outcomeId: 'o-1', callFields: ['x'] },
+      { callFields: 5 },
+    ]) {
+      await expect(dialer.saveOutcome(bad)).rejects.toMatchObject({
+        code: CLIENT_ERRORS.INVALID_OPTIONS,
+      })
+    }
+    expect(symbo.posted().length).toBe(before)
+
+    const saving = dialer.saveOutcome({ outcomeId: 'o-1' })
+    symbo.refuse(symbo.lastCommand().requestId, ERRORS.OUTCOME_PENDING, 'An outcome is required for this call.')
+    await expect(saving).rejects.toMatchObject({ code: ERRORS.OUTCOME_PENDING })
+  })
+
+  it('reload({ hard }) sends hard only when it is true', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const reloaded = vi.fn()
+    dialer.on('frame.reloaded', reloaded)
+
+    const before = symbo.posted().length
+    await expect(dialer.reload({ hard: 1 })).rejects.toMatchObject({
+      code: CLIENT_ERRORS.INVALID_OPTIONS,
+    })
+    expect(symbo.posted().length).toBe(before)
+
+    const softly = dialer.reload({ hard: false })
+    expect(symbo.lastCommand().payload).toEqual({})
+    symbo.refuse(symbo.lastCommand().requestId, ERRORS.CALL_IN_PROGRESS, 'A call is active.')
+    await expect(softly).rejects.toMatchObject({ code: ERRORS.CALL_IN_PROGRESS })
+
+    await roundTrip(
+      symbo,
+      dialer.reload({ hard: true }),
+      COMMANDS.RELOAD,
+      { hard: true },
+      { reloading: true, hard: true }
+    )
+    expect(dialer.ready).toBe(false)
+    symbo.load()
+    expect(reloaded).toHaveBeenCalledWith({ requested: true, reason: null })
+  })
+
+  it('tracks reload.required until the frame reloads', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    expect(dialer.reloadRequired).toBeNull()
+    const seen = []
+    dialer.on('reload.required', (payload) => seen.push([payload, dialer.reloadRequired]))
+
+    symbo.event('symbo:reload.required', { reason: 'plan_changed' })
+    expect(seen).toEqual([[{ reason: 'plan_changed' }, 'plan_changed']])
+
+    symbo.load()
+    expect(dialer.reloadRequired).toBeNull()
+  })
+
+  it('reports why an unasked reload happened, from the frame.leaving before it', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const seen = []
+    dialer.on('frame.leaving', (payload) => seen.push(['frame.leaving', payload]))
+    dialer.on('frame.reloaded', (payload) => seen.push(['frame.reloaded', payload]))
+
+    symbo.event('symbo:frame.leaving', { reason: 'plan_changed', inMs: 1000 })
+    expect(dialer.leavingReason).toBe('plan_changed')
+    symbo.load()
+    expect(seen).toEqual([
+      ['frame.leaving', { reason: 'plan_changed', inMs: 1000 }],
+      ['frame.reloaded', { requested: false, reason: 'plan_changed' }],
+    ])
+    expect(dialer.leavingReason).toBeNull()
+
+    // The new document passes on why it was loaded; ready forgets the notice.
+    const ready = vi.fn()
+    dialer.on('ready', ready)
+    symbo.ready({ reloadReason: 'plan_changed' })
+    expect(ready.mock.calls[0][0].reloadReason).toBe('plan_changed')
+
+    // A reload nobody announced has no reason.
+    seen.length = 0
+    symbo.load()
+    expect(seen).toEqual([['frame.reloaded', { requested: false, reason: null }]])
+
+    // Nor does one the page asked for, whatever was said around it.
+    symbo.ready()
+    const reloading = dialer.reload()
+    symbo.answer(symbo.lastCommand().requestId, { reloading: true })
+    await reloading
+    symbo.event('symbo:frame.leaving', { reason: 'logout', inMs: 600 })
+    seen.length = 0
+    symbo.load()
+    expect(seen).toEqual([['frame.reloaded', { requested: true, reason: null }]])
+  })
+
+  it('carries the reloadReason on auth.required through to the page', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
+    dialer.mount().catch(() => {})
+    const symbo = fakeSymbo(env, dialer)
+    const authRequired = vi.fn()
+    dialer.on('auth.required', authRequired)
+    symbo.load()
+    env.deliver(symbo.iframe(), {
+      type: 'symbo:auth.required',
+      payload: { loginUrl: 'https://app.symbo.ai/login?guest=abc', reloadReason: 'logout' },
+      protocolVersion: 2,
+    })
+    expect(authRequired).toHaveBeenCalledWith({
+      loginUrl: 'https://app.symbo.ai/login?guest=abc',
+      reloadReason: 'logout',
+    })
+    dialer.destroy()
+  })
+
+  it('follows the resumable session through ready, getState and session.started', async () => {
+    const dialer = SymboDialer.create({ container: env.makeContainer(), appUrl: APP_URL })
+    const mounting = dialer.mount()
+    const symbo = fakeSymbo(env, dialer)
+    expect(dialer.resumableSession).toBeNull()
+    symbo.load()
+    const resumable = { dialSessionId: 'ds-7', status: 'paused' }
+    symbo.ready({ capabilities: CURRENT, resumableSession: resumable })
+    await mounting
+    expect(dialer.resumableSession).toEqual(resumable)
+
+    // Started: nothing left to pick up.
+    symbo.event('symbo:session.started', { dialSessionId: 'ds-7', concurrentCalls: 2, dialing: false })
+    expect(dialer.resumableSession).toBeNull()
+
+    // getState says what is resumable now; an older frame's state does not
+    // carry the key, and leaves the property alone.
+    const asking = dialer.getState()
+    symbo.answer(symbo.lastCommand().requestId, { signedIn: true, resumableSession: { dialSessionId: 'ds-8', status: 'new' } })
+    await asking
+    expect(dialer.resumableSession).toEqual({ dialSessionId: 'ds-8', status: 'new' })
+    const older = dialer.getState()
+    symbo.answer(symbo.lastCommand().requestId, { signedIn: true })
+    await older
+    expect(dialer.resumableSession).toEqual({ dialSessionId: 'ds-8', status: 'new' })
+
+    // A frame that reloads takes it with it, and an older frame's ready has none.
+    symbo.load()
+    expect(dialer.resumableSession).toBeNull()
+    symbo.ready()
+    expect(dialer.resumableSession).toBeNull()
+  })
+
+  it('keeps the warning codes and the new client code where they belong', () => {
+    expect(WARNINGS.DEVICE_ENDPOINT_FAILED).toBe('DEVICE_ENDPOINT_FAILED')
+    expect(WARNINGS.SIGNED_OUT_ELSEWHERE).toBe('SIGNED_OUT_ELSEWHERE')
+    // Warning-only: never a refusal.
+    expect(ERRORS).not.toHaveProperty('DEVICE_ENDPOINT_FAILED')
+    expect(ERRORS).not.toHaveProperty('SIGNED_OUT_ELSEWHERE')
+    expect(CLIENT_ERRORS.NOT_SUPPORTED).toBe('NOT_SUPPORTED')
+    expect(ERRORS).not.toHaveProperty('NOT_SUPPORTED')
   })
 })
