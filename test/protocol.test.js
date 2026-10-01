@@ -1327,6 +1327,23 @@ describe('commands settle on the answer', () => {
     })
   })
 
+  // The frame's answer to a command that failed unexpectedly. It is outside
+  // the contract's codes, so ERRORS leaves it out, but it must still arrive.
+  it('passes COMMAND_FAILED through though ERRORS does not list it', async () => {
+    const { dialer, symbo } = await readyDialer(env, SymboDialer)
+    const holding = dialer.session.hold()
+    symbo.refuse(
+      symbo.lastCommand().requestId,
+      'COMMAND_FAILED',
+      'Request failed with status code 500'
+    )
+    await expect(holding).rejects.toMatchObject({
+      code: 'COMMAND_FAILED',
+      message: 'Request failed with status code 500',
+    })
+    expect(ERRORS).not.toHaveProperty('COMMAND_FAILED')
+  })
+
   it('falls back to UNKNOWN when a refusal names no code', async () => {
     const { dialer, symbo } = await readyDialer(env, SymboDialer)
     const dialing = dialer.dial({ number: '+1' })

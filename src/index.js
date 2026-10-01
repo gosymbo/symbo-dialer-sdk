@@ -106,7 +106,9 @@ export const EVENTS = Object.freeze({
 
 // Codes Symbo answers with. A refused command rejects with one of these on
 // `err.code`; the `error` event carries one for refusals that were not an
-// answer to anything.
+// answer to anything. A command that failed unexpectedly inside the frame is
+// answered with COMMAND_FAILED, which the frame keeps out of its own list, so
+// this one mirrors it and leaves it out too.
 export const ERRORS = Object.freeze({
   NOT_SIGNED_IN: 'NOT_SIGNED_IN',
   CALLING_NOT_ENABLED: 'CALLING_NOT_ENABLED',
