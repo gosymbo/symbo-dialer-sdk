@@ -11,8 +11,9 @@
 // play an organization that fixes every session's number of lines,
 // `updateAfter=5000` to announce a newer Symbo build that many milliseconds
 // after `ready`, `blockDialer=1` to play "Require & block dialer" (a one-off
-// call's outcome must be saved before the next dial, and survives a reload),
-// and `resumable=<id>` to report a session the rep could pick up.
+// call's outcome must be saved before the next dial, and the last call still
+// waiting for its outcome, a session's included, survives a reload), and
+// `resumable=<id>` to report a session the rep could pick up.
 //
 // Timings are compressed: legs ring for a second or two, calls last a few
 // seconds. Everything else — the message names, payload shapes, refusal codes
@@ -31,8 +32,9 @@
   const MODE = MODES.includes(params.get('mode')) ? params.get('mode') : 'widget'
   const SIZES = { widget: { width: 420, height: 485 }, compact: { width: 360, height: 56 } }
   const STORAGE_KEY = 'symbo-stub:signedIn'
-  // What survives a reload: the one-off call still waiting for its outcome
-  // under "Require & block dialer", and why the last document left.
+  // What survives a reload: the last call still waiting for its outcome
+  // under "Require & block dialer", one-off or the session's, and why the
+  // last document left.
   const PENDING_CALL_KEY = 'symbo-stub:pendingCall'
   const LEAVING_KEY = 'symbo-stub:leavingReason'
   const MIN_LINES = 1
@@ -315,7 +317,6 @@
         'callsWhilePaused',
         'sessionHold',
         'sessionLoad',
-        'sessionEndById',
         'removeQueuedCalls',
         'callWaiting',
         'saveOutcome',
@@ -705,6 +706,7 @@
         status: 'ringing',
         reason: null,
         startedAt: null,
+        dialedAt: new Date().toISOString(),
       }
       row.status = 'dialing'
       row.attempts += 1
@@ -772,6 +774,22 @@
       outcomeRequired: true,
     }
     post('symbo:session.postCall', session.postCall)
+    // A reload brings it back like a one-off call, as the real frame does.
+    if (BLOCK_DIALER) {
+      localStorage.setItem(
+        PENDING_CALL_KEY,
+        JSON.stringify({
+          callId: leg.callId,
+          prospectId: leg.prospectId,
+          number: PROSPECTS[leg.prospectId].number,
+          externalId: null,
+          answered: true,
+          durationSeconds,
+          dialedAt: leg.dialedAt,
+          restored: false,
+        })
+      )
+    }
     queueUpdated()
     render()
   }
@@ -956,13 +974,6 @@
   }
 
   /* -------------------------------------------------------------- commands */
-
-  // A single removeQueued that was skipped, as the refusal it becomes.
-  const SKIPPED_REFUSALS = {
-    dialing: ['QUEUED_CALL_DIALING', 'This call is being dialed'],
-    already_removed: ['QUEUED_CALL_NOT_FOUND', 'This call is no longer queued'],
-    not_found: ['QUEUED_CALL_NOT_FOUND', 'Queued call not found'],
-  }
 
   const OTHER_CALL_MESSAGE = 'Another call is in progress. Resume the session once it has ended.'
   const DIAL_PENDING_MESSAGE = 'A dial is already being placed.'
@@ -1338,19 +1349,15 @@
       resumeDialing()
     },
 
-    // With the id of a session that is not loaded here, it is ended through
-    // Symbo's API, and no session.ended follows: session events describe the
-    // loaded session.
+    // Only the session loaded here; the partner's server ends any other.
     'symbo:session.end'(msg) {
       const { force, dialSessionId } = msg.payload
       if (dialSessionId !== undefined && dialSessionId !== null && dialSessionId !== session?.dialSessionId) {
-        if (typeof dialSessionId !== 'string' || !dialSessionId || /missing/i.test(dialSessionId)) {
-          return refuse(msg, 'SESSION_NOT_FOUND', 'Dial session not found')
-        }
-        heldSessions.delete(dialSessionId)
-        if (resumable?.dialSessionId === dialSessionId) resumable = null
-        // Guess: a session the stub never ran has nothing to count.
-        return ok(msg, { dialSessionId, counts: noCounts() })
+        return refuse(
+          msg,
+          'SESSION_NOT_FOUND',
+          'Only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.'
+        )
       }
       if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
       const connected = sessionConnected()
@@ -1396,44 +1403,41 @@
       render()
     },
 
-    // One queued call (queuedCallId) or a list (queuedCallIds), decided row
-    // by row as Symbo's remove endpoint does: a call being dialed is left
-    // alone, and the list form says which were removed and which skipped.
+    // One queued call (queuedCallId) or a list (queuedCallIds), removed the
+    // way Symbo's bulk remove does, ids in any case: a call being dialed is
+    // left alone, and the list form says how many went and which were skipped.
     'symbo:session.removeQueued'(msg) {
       if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
       const { queuedCallId, queuedCallIds } = msg.payload
       const listForm = Array.isArray(queuedCallIds)
       let ids
       if (listForm) {
-        ids = [...new Set(queuedCallIds.filter((id) => typeof id === 'string' && id))]
+        ids = [...new Set(queuedCallIds.filter((id) => typeof id === 'string' && id).map((id) => id.toLowerCase()))]
         if (!ids.length) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'queuedCallIds is required')
         if (ids.length > MAX_QUEUED_CALL_IDS) {
           return refuse(msg, 'QUEUED_CALL_NOT_FOUND', `queuedCallIds takes at most ${MAX_QUEUED_CALL_IDS} ids`)
         }
       } else {
         if (!queuedCallId) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'queuedCallId is required')
-        ids = [queuedCallId]
+        ids = [String(queuedCallId).toLowerCase()]
+        const row = session.queue.find((r) => r.queuedCallId === ids[0])
+        if (row?.status === 'dialing') return refuse(msg, 'QUEUED_CALL_DIALING', 'This call is being dialed')
+        if (!row) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'Queued call not found')
+        if (row.status === 'removed') return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'This call is no longer queued')
       }
 
-      const removed = []
+      let removedCount = 0
       const skipped = []
       ids.forEach((id) => {
         const row = session.queue.find((r) => r.queuedCallId === id)
-        const reason = !row
-          ? 'not_found'
-          : row.status === 'dialing'
-            ? 'dialing'
-            : row.status === 'removed'
-              ? 'already_removed'
-              : null
-        if (reason) return skipped.push({ queuedCallId: id, reason })
+        if (row?.status === 'dialing') return skipped.push({ queuedCallId: id, reason: 'dialing' })
+        if (!row || row.status === 'removed') return
         row.status = 'removed'
-        removed.push(id)
+        removedCount += 1
       })
 
-      if (!listForm && !removed.length) return refuse(msg, ...SKIPPED_REFUSALS[skipped[0].reason])
-      ok(msg, listForm ? { removed, skipped } : {})
-      if (removed.length) queueUpdated()
+      ok(msg, listForm ? { removedCount, skipped } : {})
+      if (removedCount) queueUpdated()
     },
 
     // Like the real frame, the event goes out before the answer, and only when
@@ -1483,6 +1487,9 @@
       row.status = 'completed'
       row.lastOutcomeId = resolvedId
       session.postCall = null
+      if (JSON.parse(localStorage.getItem(PENDING_CALL_KEY))?.callId === postCall.callId) {
+        localStorage.removeItem(PENDING_CALL_KEY)
+      }
       ok(msg, { callId: postCall.callId, outcomeId: resolvedId })
 
       post('symbo:call.completed', {

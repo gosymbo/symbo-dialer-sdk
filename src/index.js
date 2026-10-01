@@ -425,21 +425,19 @@ class SymboDialerClient {
       // Park the session without ending it; session.start picks it up again.
       hold: () => this.send(COMMANDS.SESSION_HOLD),
       end: (options = {}) => {
-        const payload = { force: !!options.force }
+        // Never sent: an older frame ignores the id and ends the loaded session.
         if (options.dialSessionId !== undefined) {
-          if (!isNonEmptyString(options.dialSessionId)) {
-            return Promise.reject(
-              invalid("session.end's dialSessionId must be a non-empty string.")
+          return Promise.reject(
+            invalid(
+              'session.end takes no dialSessionId: only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.'
             )
-          }
-          // An older frame ignores the id and ends the session loaded in it.
-          const refused = this.unsupported('sessionEndById', 'session.end({ dialSessionId })')
-          if (refused) return refused
-          payload.dialSessionId = options.dialSessionId
+          )
         }
-        return this.send(COMMANDS.SESSION_END, payload)
+        return this.send(COMMANDS.SESSION_END, { force: !!options.force })
       },
       skipCurrent: () => this.send(COMMANDS.SESSION_SKIP_CURRENT),
+      // One id resolves {}; a list resolves { removedCount, skipped }, where
+      // skipped names the calls left alone because they are being dialed.
       removeQueued: (arg) => {
         const queuedCallIds = Array.isArray(arg) ? arg : arg?.queuedCallIds
         if (queuedCallIds !== undefined) {
@@ -1010,7 +1008,8 @@ class SymboDialerClient {
    * Save the outcome, note or call fields of a one-off or inbound call: the
    * one waiting in its post-call step, or the call `callId` names. Resolves
    * with `{ callId, outcomeId }`; `call.completed` follows for the call that
-   * was waiting. A session's call is saved with session.saveOutcome.
+   * was waiting. A session's call is saved with session.saveOutcome, unless a
+   * reload brought it back.
    */
   saveOutcome(options = {}) {
     const given = (key) => options[key] !== undefined && options[key] !== null

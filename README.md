@@ -471,8 +471,10 @@ It saves the call waiting in its post-call step or, with `callId`, any one-off
 or inbound call after the fact; it needs an outcome, a note or call fields to
 write. Only a save of the call that was waiting sends `call.completed` and
 closes that step. A session's call is saved with `session.saveOutcome`
-instead. Check `dialer.hasCapability('saveOutcome')` first: an older Symbo
-release answers `UNKNOWN_COMMAND`. Your server can still save it with
+instead, unless a reload brought it back
+([below](#reloads-you-did-not-ask-for)). Check
+`dialer.hasCapability('saveOutcome')` first: an older Symbo release answers
+`UNKNOWN_COMMAND`. Your server can still save it with
 `PUT /calls/{id}`; the frame learns of that write only when it next checks,
 which `dial()`, `reload()` and `signOut()` do before refusing with
 `POSTCALL_DETAILS_REQUIRED`.
@@ -724,11 +726,11 @@ your server makes with `PUT /calls/{id}` does not reach it, so
 | `session.skipCurrent()` | Hangs up the connected call and skips its outcome |
 | `hangUp()` | Hangs up the connected call (→ `session.postCall`), or cancels ringing lines; during a one-off or inbound call, hangs that up |
 | `session.hold()` | Parks the session without ending it, as Symbo's Back → Hold does: ringing lines are hung up, the rep's line drops, a call waiting for its outcome is closed without one, and the session goes on `hold` with its queue kept. `session.held { dialSessionId, counts }` follows, and it resolves the same. `session.start({ dialSessionId })` picks it up again, its cancelled calls back on the queue. Refused with `CALL_IN_PROGRESS` while a call is connected. If `end()` was asked for during the call, or an admin closed the session, a hold in the post-call step completes that instead: `session.ended` arrives, not `session.held`, and it still resolves `{ dialSessionId, counts }`. If Symbo turns the hold down, a session it no longer finds is unloaded, `session.ended` follows and the hold is refused with `SESSION_NOT_FOUND`; on any other failure the session stays loaded, paused with the rep's line down (what the hold already hung up or closed stays so), `session.paused { reason: 'requested' }` follows unless it was paused already, and the hold is refused with `COMMAND_FAILED`: hold again, or `session.resume()`. Check `dialer.hasCapability('sessionHold')` first |
-| `session.removeQueued(queuedCallId \| [ids] \| { queuedCallIds })` | Drops queued contacts from this session; Symbo decides row by row, and leaves one being dialed alone. One id resolves `{}`, or is refused with `QUEUED_CALL_DIALING` while its line rings or is connected and `QUEUED_CALL_NOT_FOUND` when it is not on the session or already removed. A list of 1 to 1000 ids resolves `{ removed: [ids], skipped: [{ queuedCallId, reason: 'dialing' \| 'already_removed' \| 'not_found' }] }`. Ids match whatever their case, and come back in Symbo's lower case. For a rep with power dialing (a frame that lists `session`), the SDK refuses a list with `NOT_SUPPORTED` unless `dialer.hasCapability('removeQueuedCalls')` |
-| `session.end({ force, dialSessionId })` | Ends the session and drops the rep's line. Refused with `CALL_IN_PROGRESS` over a connected call unless `force: true`; the call survives either way. Resolves with `{ dialSessionId, counts }`. With the `dialSessionId` of a session that is not loaded here — one left on hold, or `ready.resumableSession` — it ends that one through Symbo's API instead, refused with `CALL_IN_PROGRESS` while a call on it is connected unless `force: true`, and sends no `session.ended`: session events describe the loaded session. An older Symbo release would end the loaded session, so for a rep with power dialing (a frame that lists `session`) the SDK refuses `dialSessionId` with `NOT_SUPPORTED` unless `dialer.hasCapability('sessionEndById')` |
+| `session.removeQueued(queuedCallId \| [ids] \| { queuedCallIds })` | Drops queued contacts from this session, as Symbo's bulk remove does, and leaves one being dialed alone. One id resolves `{}`, or is refused with `QUEUED_CALL_DIALING` while its line rings or is connected and `QUEUED_CALL_NOT_FOUND` when it is not on the session or already removed. A list of 1 to 1000 ids resolves `{ removedCount, skipped: [{ queuedCallId, reason: 'dialing' }] }`: how many were removed, and the ones left alone because their line rings or is connected; an id not on the session, or already removed, is neither counted nor listed. Ids match whatever their case, and come back in Symbo's lower case. For a rep with power dialing (a frame that lists `session`), the SDK refuses a list with `NOT_SUPPORTED` unless `dialer.hasCapability('removeQueuedCalls')` |
+| `session.end({ force })` | Ends the session loaded here and drops the rep's line. Refused with `CALL_IN_PROGRESS` over a connected call unless `force: true`; the call survives either way. Resolves with `{ dialSessionId, counts }`. It ends only the loaded session: end another one — one left on hold, or `ready.resumableSession` — from your server with `POST /v1/dialSessions/{id}/actions/end`. The SDK refuses a `dialSessionId` with `INVALID_OPTIONS` and sends nothing, as an older Symbo release would end the loaded session instead |
 | `session.getQueue()` | `{ dialSessionId, counts, queue: [{ queuedCallId, prospectId, prospectName, number, status, order, attempts, lastCallId, lastOutcomeId }] }` |
 | `session.setConcurrentCalls(n)` | Rings `n` lines, 1 to 4, from the next round; lines already ringing are neither hung up nor added to. Sends `session.concurrentCallsChanged` when the number changes; asking for the current number just resolves. Refused with `CONCURRENT_CALLS_LOCKED` when your organization locks a different number (`dialer.concurrentCallsLocked`). Check `dialer.hasCapability('concurrentCalls')` first |
-| `getState()` | Everything at once: `{ signedIn, deviceReady, mode, powerDialing, concurrentCalls, concurrentCallsLocked, updateAvailable, session, call, muted, incoming, warnings, resumableSession, reloadRequired }`. A one-off call in its post-call step reads `call: { callId, status: 'post_call', prospectId, number, durationSeconds, dialedAt, blocksDialing, restored }` |
+| `getState()` | Everything at once: `{ signedIn, deviceReady, mode, powerDialing, concurrentCalls, concurrentCallsLocked, updateAvailable, session, call, muted, incoming, warnings, resumableSession, reloadRequired }`. A one-off call in its post-call step, or any call a reload brought back, reads `call: { callId, status: 'post_call', prospectId, number, durationSeconds, dialedAt, blocksDialing, restored }` |
 
 Things the engine decides on its own, and that you should expect: it retries
 an unanswered contact on the retry schedule, and rotates
@@ -916,15 +918,15 @@ and what it held comes back like this:
 
 - **A session loaded in it** is paused on Symbo's side, and the new `ready`
   names it in `resumableSession`. Call `session.start({ dialSessionId })` to
-  carry on, with `dial: false` to load it without dialing. A session call
-  that was waiting for its outcome does not get its post-call step back: save
-  it with `dialer.saveOutcome({ callId })` or from your server
-  (`PUT /calls/{id}`); the `callId` came with `session.postCall`.
-- **A one-off or inbound call waiting for its outcome** comes back under
-  "Require & block dialer": the new frame sends
+  carry on, with `dial: false` to load it without dialing.
+- **A call waiting for its outcome**, one-off, inbound or the session's,
+  comes back under "Require & block dialer", as in Symbo: the new frame sends
   `call.postCall { restored: true, dialedAt }` after `ready`,
   `getState().call` shows it, and `dialer.saveOutcome()` saves it as before.
-  Otherwise its post-call step is gone; save it by `callId`.
+  A session's call is saved this way too, with
+  `dialer.saveOutcome({ callId })` (the `callId` came with `session.postCall`),
+  not `session.saveOutcome`. Otherwise its post-call step is gone; save it by
+  `callId`, or from your server (`PUT /calls/{id}`).
 
 So keep your own copy of what you need to carry on — the session you started,
 the call waiting for its outcome — from the events as they arrive, or from a
@@ -981,9 +983,9 @@ one of the [error codes](#error-codes) and whose `.message` says why.
 | `session.start({ dialSessionId, concurrentCalls?, dial? })` | `{ dialSessionId, concurrentCalls, concurrentCallsLocked, dialing }` |
 | `session.pause()` / `session.resume()` / `session.skipCurrent()` | `{}` |
 | `session.hold()` | `{ dialSessionId, counts }` |
-| `session.end({ force?, dialSessionId? })` | `{ dialSessionId, counts }` |
+| `session.end({ force? })` | `{ dialSessionId, counts }` |
 | `session.removeQueued(queuedCallId \| { queuedCallId })` | `{}` |
-| `session.removeQueued([ids] \| { queuedCallIds })` | `{ removed, skipped }` |
+| `session.removeQueued([ids] \| { queuedCallIds })` | `{ removedCount, skipped }` |
 | `session.getQueue()` | `{ dialSessionId, counts, queue }` |
 | `session.saveOutcome({ callId?, outcomeId?, outcomeValue?, note?, callFields?, then })` | `{ callId, outcomeId }` |
 | `session.setConcurrentCalls(n \| { concurrentCalls })` | `{ dialSessionId, concurrentCalls }` |
@@ -1040,7 +1042,6 @@ only listed for a rep with power dialing.
 | `callsWhilePaused` † | `dial()` and `answerIncoming()` while a session is paused with the rep's line down |
 | `sessionHold` † | `session.hold()` |
 | `sessionLoad` † | `session.start({ dial: false })`, `resumableSession` |
-| `sessionEndById` † | `session.end({ dialSessionId })` |
 | `removeQueuedCalls` † | `session.removeQueued()` with a list |
 | `callWaiting` | inbound calls offered during a call, and `answerIncoming({ endCurrent: true })` |
 | `saveOutcome` | `saveOutcome()` |
@@ -1108,7 +1109,7 @@ A refused command rejects with a `SymboDialerError` carrying one of these on
 | `INVALID_NUMBER` / `PROSPECT_NOT_FOUND` | `dial()` had nothing usable to dial |
 | `CALL_IN_PROGRESS` / `NO_ACTIVE_CALL` | A call is up, or a `dial()` is still being placed, when it must not be / there is none to act on |
 | `SESSION_ACTIVE` | A power-dial session has the rep's line — it is dialing, or one of its calls is in front of the rep — so `dial()` or `answerIncoming()` is refused; `signOut()` and `reload()` are refused while any session is loaded |
-| `POSTCALL_DETAILS_REQUIRED` | Under "Require & block dialer" (`blocksDialing`), the last one-off call still needs its outcome: save it with `saveOutcome()` |
+| `POSTCALL_DETAILS_REQUIRED` | Under "Require & block dialer" (`blocksDialing`), the last one-off call, or the call a reload brought back, still needs its outcome: save it with `saveOutcome()` |
 | `NO_INCOMING_CALL` | Nothing is ringing |
 | `AUDIO_DEVICE_NOT_FOUND` | Unknown device id |
 | `TOKEN_REQUIRED` / `TOKEN_REJECTED` | `signIn()` was given a blank token (none at all is `INVALID_OPTIONS`) / Symbo would not accept the one it got, or could not finish the sign-in; `err.message` gives the reason |
@@ -1119,12 +1120,12 @@ A refused command rejects with a `SymboDialerError` carrying one of these on
 | `ACCOUNT_SETUP_INCOMPLETE` / `OTP_REQUIRED` / `ACCOUNT_SUSPENDED` / `ACCOUNT_INACTIVE` / `SUBSCRIPTION_REQUIRED` | `signIn()` refused by Symbo's own login rules: the rep's account is unfinished, needs a verified phone, is suspended or inactive, or the organisation has no active subscription. Fixed in Symbo, not in your code |
 | `RATE_LIMITED` | Too many `signIn()` calls from one IP address in a short time; wait a minute |
 | `REALTIME_DISCONNECTED` | The frame's realtime connection is down; try again shortly |
-| `SESSION_NOT_FOUND` / `SESSION_NOT_STARTABLE` / `SESSION_ALREADY_ACTIVE` | `session.start` problems: not visible to this rep, ended or on another rep's queue, or a session is already loaded. `SESSION_NOT_FOUND` also answers `session.end({ dialSessionId })`, `session.hold()` and `session.removeQueued` for a session Symbo no longer finds |
+| `SESSION_NOT_FOUND` / `SESSION_NOT_STARTABLE` / `SESSION_ALREADY_ACTIVE` | `session.start` problems: not visible to this rep, ended or on another rep's queue, or a session is already loaded. `SESSION_NOT_FOUND` also answers `session.hold()` for a session Symbo no longer finds |
 | `NO_ACTIVE_SESSION` | A `session.*` command with no session running |
 | `CONCURRENT_CALLS_LOCKED` / `INVALID_CONCURRENT_CALLS` | `setConcurrentCalls` or `session.start` asked for a number of lines other than your organization's lock / that this Symbo release does not offer. A count that is not a whole number from 1 to 4 never reaches Symbo: the SDK refuses it with `INVALID_OPTIONS` |
 | `OUTCOME_PENDING` | `session.resume` before the last call's outcome was saved; `saveOutcome()` without an outcome for a call that requires one |
 | `NO_CALL_TO_SAVE` / `OUTCOME_UNKNOWN` / `NOTE_REQUIRED` | `session.saveOutcome` and `saveOutcome()` problems: nothing waiting for an outcome (or, for `saveOutcome()`, the session's own call), an unknown outcome or nothing to write, or an outcome that requires a note and got none |
-| `QUEUED_CALL_NOT_FOUND` / `QUEUED_CALL_DIALING` | `session.removeQueued` problems |
+| `QUEUED_CALL_NOT_FOUND` / `QUEUED_CALL_DIALING` | `session.removeQueued` with one id: it is not on the session or already removed / its line rings or is connected. A list is not refused for either: it counts what it removed and lists the calls being dialed in `skipped` |
 | `INVALID_MUTED` / `INVALID_DIGITS` | `setMuted` was not given `true` or `false` / `sendDigits` was given something other than 1 to 32 of `0`-`9`, `*` and `#`. The SDK checks both before sending and refuses with `INVALID_OPTIONS`, so these only reach a page that posts the messages itself |
 | `UNKNOWN_COMMAND` | The Symbo release in front of you does not know this command yet |
 | `COMMAND_FAILED` | Something unexpected failed inside the frame while it ran the command; `err.message` carries what it caught. Retry, or check the frame's console. Not in `ERRORS`: it is the frame's answer for a failure outside the codes above, so compare `err.code` with the string |
@@ -1134,10 +1135,10 @@ Raised by the SDK itself, before anything reached Symbo (exported as
 `MOUNT_TIMEOUT`, `COMMAND_TIMEOUT`, `NO_LOGIN_URL`, `POPUP_BLOCKED`,
 `FRAME_RELOADED` (the frame reloaded before answering), `NOT_SUPPORTED` (an
 option the Symbo release in front of you would misread rather than refuse:
-`session.start({ dial: false })`, `session.end({ dialSessionId })` or a list
-for `session.removeQueued`; the message names the capability to check). For a
-rep without power dialing, whose frame advertises no `session`, these go to
-the frame and get its own answer, such as `POWER_DIALING_NOT_ENABLED`.
+`session.start({ dial: false })` or a list for `session.removeQueued`; the
+message names the capability to check). For a rep without power dialing, whose
+frame advertises no `session`, these go to the frame and get its own answer,
+such as `POWER_DIALING_NOT_ENABLED`.
 
 ## Hidden-mode checklist
 
@@ -1190,7 +1191,7 @@ be right in advance.
 | 0.2.0 | the power-dial embed | everything above, plus `create()`, all three modes, `signIn / signOut / openSignIn`, `getState`, `dial({ prospectId })`, sessions and their number of lines, inbound, audio devices, warnings |
 | 0.3.0 | mute and keypad in the embed | everything above, plus `setMuted / sendDigits`, `call.muteChanged`, `dialer.muted` |
 | 0.3.1 | the same (hearing the reloaded frame afresh needs the Symbo release that answers `signIn()` with `reloading`) | everything above; commands waiting when a ready frame reloads reject with `FRAME_RELOADED` instead of timing out, and the frame a `signIn()` reloads into is heard afresh, once until the next `ready` |
-| **0.4.0** | session hold and one-off outcomes in the embed | everything above, plus `saveOutcome()`, `session.hold()`, `session.start({ dial: false })`, `session.end({ dialSessionId })`, `session.removeQueued()` with a list, `answerIncoming({ endCurrent })`, `reload({ hard })`; `session.held`, `reload.required`, `frame.leaving`; `dialer.resumableSession`, `dialer.reloadRequired`, `frame.reloaded.reason`; the `NOT_SUPPORTED` client code |
+| **0.4.0** | session hold and one-off outcomes in the embed | everything above, plus `saveOutcome()`, `session.hold()`, `session.start({ dial: false })`, `session.removeQueued()` with a list, `answerIncoming({ endCurrent })`, `reload({ hard })`; `session.held`, `reload.required`, `frame.leaving`; `dialer.resumableSession`, `dialer.reloadRequired`, `frame.reloaded.reason`; the `NOT_SUPPORTED` client code |
 
 `PROTOCOL_VERSION` is `2` for all of them: every change since 0.1.x is
 additive, so an older integration keeps working against a newer release, and a

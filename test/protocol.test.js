@@ -1997,7 +1997,6 @@ describe('calls during a session, hold, one-off outcomes and reloads', () => {
     'callsWhilePaused',
     'sessionHold',
     'sessionLoad',
-    'sessionEndById',
     'removeQueuedCalls',
     'callWaiting',
     'saveOutcome',
@@ -2066,54 +2065,29 @@ describe('calls during a session, hold, one-off outcomes and reloads', () => {
     expect(symbo.lastCommand().payload).toEqual({ dialSessionId: 'ds-1', dial: true })
   })
 
-  it('session.end({ dialSessionId }) ends a session that is not loaded, where the frame supports it', async () => {
-    const { dialer, symbo } = await currentDialer()
-    const counts = { queued: 0, dialing: 0, attempted: 2, completed: 1, cancelled: 3, removed: 0, remaining: 0 }
-    await roundTrip(
-      symbo,
-      dialer.session.end({ dialSessionId: 'ds-other' }),
-      COMMANDS.SESSION_END,
-      { force: false, dialSessionId: 'ds-other' },
-      { dialSessionId: 'ds-other', counts }
-    )
-    await roundTrip(
-      symbo,
-      dialer.session.end({ dialSessionId: 'ds-other', force: true }),
-      COMMANDS.SESSION_END,
-      { force: true, dialSessionId: 'ds-other' },
-      { dialSessionId: 'ds-other', counts }
-    )
+  it('refuses session.end({ dialSessionId }) locally, which an older frame would read as ending the loaded session', async () => {
+    for (const ready of [currentDialer, () => readyDialer(env, SymboDialer)]) {
+      const { dialer, symbo } = await ready()
+      const before = symbo.posted().length
+      for (const id of ['ds-other', '', null]) {
+        await expect(dialer.session.end({ dialSessionId: id })).rejects.toMatchObject({
+          code: CLIENT_ERRORS.INVALID_OPTIONS,
+          message:
+            'session.end takes no dialSessionId: only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.',
+        })
+      }
+      expect(symbo.posted().length).toBe(before)
 
-    const before = symbo.posted().length
-    for (const bad of ['', 42, null]) {
-      await expect(dialer.session.end({ dialSessionId: bad })).rejects.toMatchObject({
-        code: CLIENT_ERRORS.INVALID_OPTIONS,
-      })
+      dialer.session.end({ force: true })
+      expect(symbo.lastCommand().payload).toEqual({ force: true })
     }
-    expect(symbo.posted().length).toBe(before)
   })
 
-  it('refuses end({ dialSessionId }) locally on a frame without sessionEndById, which would end the loaded session', async () => {
-    const { dialer, symbo } = await readyDialer(env, SymboDialer)
-    const before = symbo.posted().length
-    await expect(dialer.session.end({ dialSessionId: 'ds-other' })).rejects.toMatchObject({
-      code: CLIENT_ERRORS.NOT_SUPPORTED,
-    })
-    expect(symbo.posted().length).toBe(before)
-
-    // Without an id it is the end every release knows.
-    dialer.session.end()
-    expect(symbo.lastCommand().payload).toEqual({ force: false })
-  })
-
-  it('session.removeQueued takes a list, and answers which were removed and which skipped', async () => {
+  it('session.removeQueued takes a list, and answers how many were removed and which were skipped', async () => {
     const { dialer, symbo } = await currentDialer()
     const result = {
-      removed: ['q-1', 'q-3'],
-      skipped: [
-        { queuedCallId: 'q-2', reason: 'dialing' },
-        { queuedCallId: 'q-9', reason: 'not_found' },
-      ],
+      removedCount: 2,
+      skipped: [{ queuedCallId: 'q-2', reason: 'dialing' }],
     }
     await roundTrip(
       symbo,
@@ -2127,7 +2101,7 @@ describe('calls during a session, hold, one-off outcomes and reloads', () => {
       dialer.session.removeQueued({ queuedCallIds: ['q-4'] }),
       COMMANDS.SESSION_REMOVE_QUEUED,
       { queuedCallIds: ['q-4'] },
-      { removed: ['q-4'], skipped: [] }
+      { removedCount: 1, skipped: [] }
     )
     // The single form is unchanged.
     await roundTrip(
@@ -2175,15 +2149,6 @@ describe('calls during a session, hold, one-off outcomes and reloads', () => {
     expect(sent).toMatchObject({ type: COMMANDS.SESSION_START, payload: { dialSessionId: 'ds-1', dial: false } })
     symbo.refuse(sent.requestId, ERRORS.POWER_DIALING_NOT_ENABLED, 'Power dialing is not enabled')
     await expect(start).rejects.toMatchObject({ code: ERRORS.POWER_DIALING_NOT_ENABLED })
-
-    const counts = { queued: 0, dialing: 0, attempted: 1, completed: 0, cancelled: 2, removed: 0, remaining: 0 }
-    await roundTrip(
-      symbo,
-      dialer.session.end({ dialSessionId: 'ds-other' }),
-      COMMANDS.SESSION_END,
-      { force: false, dialSessionId: 'ds-other' },
-      { dialSessionId: 'ds-other', counts }
-    )
 
     const removal = dialer.session.removeQueued(['q-1'])
     sent = symbo.lastCommand()

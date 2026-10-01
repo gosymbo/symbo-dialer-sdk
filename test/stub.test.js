@@ -1171,6 +1171,38 @@ describe('the offline stub, driven through the SDK', () => {
     expect((await dialer.dial({ number: '+12125550123' })).callId).toBeTruthy()
   })
 
+  it('"Require & block dialer": a session call waiting for its outcome comes back after a reload, like a one-off', async () => {
+    const { dialer, stub, mounting } = await mountOnStub({ query: 'blockDialer=1' })
+    await mounting
+    await vi.advanceTimersByTimeAsync(300)
+    await dialer.session.start({ dialSessionId: 'ds-demo' })
+    await vi.advanceTimersByTimeAsync(2500)
+    await dialer.hangUp()
+    const { callId } = stub.sentOfType('symbo:session.postCall').at(-1)
+
+    // The page reloads the frame with the session loaded.
+    const seen = []
+    dialer.on('*', (name, payload) => seen.push([name, payload]))
+    loadStub(env, dialer, { mode: 'compact', query: 'blockDialer=1', storage: stub.storage })
+    dialer.iframe.dispatch('load')
+    expect(seen.map(([n]) => n).slice(0, 4)).toEqual(['frame.reloaded', 'ready', 'resize', 'call.postCall'])
+    expect(seen[3][1]).toMatchObject({
+      callId,
+      prospectId: 'p-1002',
+      answered: true,
+      blocksDialing: true,
+      restored: true,
+    })
+    expect(Number.isNaN(Date.parse(seen[3][1].dialedAt))).toBe(false)
+    expect((await dialer.getState()).call).toMatchObject({ callId, status: 'post_call', restored: true })
+
+    await vi.advanceTimersByTimeAsync(300)
+    await expect(dialer.dial({ number: '+1' })).rejects.toMatchObject({ code: 'POSTCALL_DETAILS_REQUIRED' })
+    await dialer.saveOutcome({ callId, outcomeId: 'o-connected' })
+    expect(seen.map(([n]) => n)).toContain('call.completed')
+    expect(stub.storage.has('symbo-stub:pendingCall')).toBe(false)
+  })
+
   it('"Require & block dialer" in widget mode: reload waits for the outcome as well', async () => {
     const { dialer, mounting } = await mountOnStub({ mode: 'widget', query: 'blockDialer=1' })
     await mounting
@@ -1189,17 +1221,14 @@ describe('the offline stub, driven through the SDK', () => {
     await vi.advanceTimersByTimeAsync(500)
 
     seen.length = 0
-    expect(await dialer.session.removeQueued(['q-2', 'q-3', 'q-nope', 'q-3'])).toEqual({
-      removed: ['q-3'],
-      skipped: [
-        { queuedCallId: 'q-2', reason: 'dialing' },
-        { queuedCallId: 'q-nope', reason: 'not_found' },
-      ],
+    expect(await dialer.session.removeQueued(['Q-2', 'q-3', 'q-nope', 'Q-3'])).toEqual({
+      removedCount: 1,
+      skipped: [{ queuedCallId: 'q-2', reason: 'dialing' }],
     })
     expect(names()).toEqual(['session.queue.updated'])
     expect(await dialer.session.removeQueued({ queuedCallIds: ['q-3', 'q-4'] })).toEqual({
-      removed: ['q-4'],
-      skipped: [{ queuedCallId: 'q-3', reason: 'already_removed' }],
+      removedCount: 1,
+      skipped: [],
     })
     await expect(dialer.session.removeQueued('q-3')).rejects.toMatchObject({
       code: 'QUEUED_CALL_NOT_FOUND',
@@ -1212,25 +1241,25 @@ describe('the offline stub, driven through the SDK', () => {
     expect(counts).toMatchObject({ dialing: 2, removed: 2, queued: 2 })
   })
 
-  it('ends a session that is not loaded by its id, with no session.ended', async () => {
+  it('ends only the session loaded here; another is ended from the partner server', async () => {
     const { dialer, seen, names } = await readyOnStub()
-    expect(dialer.hasCapability('sessionEndById')).toBe(true)
-    expect(await dialer.session.end({ dialSessionId: 'ds-old' })).toEqual({
-      dialSessionId: 'ds-old',
-      counts: { queued: 0, dialing: 0, attempted: 0, completed: 0, cancelled: 0, removed: 0, remaining: 0 },
-    })
-
     await dialer.session.start({ dialSessionId: 'ds-demo', dial: false })
     seen.length = 0
-    expect((await dialer.session.end({ dialSessionId: 'ds-other' })).dialSessionId).toBe('ds-other')
-    await expect(dialer.session.end({ dialSessionId: 'ds-missing' })).rejects.toMatchObject({
+
+    // The SDK never sends an id; the frame refuses one a page posts itself.
+    await expect(dialer.session.end({ dialSessionId: 'ds-other' })).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+    })
+    await expect(dialer.send('symbo:session.end', { dialSessionId: 'ds-other' })).rejects.toMatchObject({
       code: 'SESSION_NOT_FOUND',
+      message:
+        'Only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.',
     })
     expect(names()).toEqual([])
     expect((await dialer.getState()).session.dialSessionId).toBe('ds-demo')
 
     // The loaded session's own id ends it like end() does.
-    await dialer.session.end({ dialSessionId: 'ds-demo' })
+    await dialer.send('symbo:session.end', { dialSessionId: 'ds-demo' })
     expect(names()).toEqual(['session.ended'])
   })
 
