@@ -467,14 +467,15 @@ await dialer.saveOutcome({
 }) // → { callId, outcomeId }; call.completed follows
 ```
 
-It saves the call waiting in its post-call step or, with `callId`, any one-off
-or inbound call after the fact; it needs an outcome, a note or call fields to
-write. Only a save of the call that was waiting sends `call.completed` and
-closes that step. A session's call is saved with `session.saveOutcome`
-instead, unless a reload brought it back
-([below](#reloads-you-did-not-ask-for)). Check
-`dialer.hasCapability('saveOutcome')` first: an older Symbo release answers
-`UNKNOWN_COMMAND`. Your server can still save it with
+It saves the call waiting in its post-call step or, with `callId`, any call
+after the fact, including a session call the frame no longer holds; it needs
+an outcome, a note or call fields to write. Only a save of the call that was
+waiting sends `call.completed` and closes that step. A session call in front
+of the rep is saved with `session.saveOutcome` instead; one the frame no
+longer holds, after a `session.hold()` or a reload
+([below](#reloads-you-did-not-ask-for)), is saved here with its `callId`.
+Check `dialer.hasCapability('saveOutcome')` first: an older Symbo release
+answers `UNKNOWN_COMMAND`. Your server can still save it with
 `PUT /calls/{id}`; the frame learns of that write only when it next checks,
 which `dial()`, `reload()` and `signOut()` do before refusing with
 `POSTCALL_DETAILS_REQUIRED`.
@@ -975,7 +976,7 @@ one of the [error codes](#error-codes) and whose `.message` says why.
 | `openSignIn()` | the opened `Window` (synchronous; throws `NO_LOGIN_URL` / `POPUP_BLOCKED`). Wait for `ready`, not for that window to close: under `Cross-Origin-Opener-Policy: same-origin` the handle is severed when the login page loads and starts reading `closed === true` |
 | `answerIncoming({ endCurrent? })` | `{ callId }`. `endCurrent: true` ends the call the rep is on first. See [Inbound calls](#inbound-calls) |
 | `ignoreIncoming()` | `{}` |
-| `saveOutcome({ callId?, outcomeId?, outcomeValue?, note?, callFields? })` | `{ callId, outcomeId }` — a one-off or inbound call's outcome; `call.completed` follows for the call waiting in its post-call step. See [One-off calls](#one-off-calls) |
+| `saveOutcome({ callId?, outcomeId?, outcomeValue?, note?, callFields? })` | `{ callId, outcomeId }` — the outcome of a one-off or inbound call, or of a session call the frame no longer holds; `call.completed` follows for the call waiting in its post-call step. See [One-off calls](#one-off-calls) |
 | `audio.list()` | `{ microphones, speakers, selected }` |
 | `audio.set({ microphoneId?, speakerId? })` | same as `audio.list()` |
 | `setMuted(muted \| { muted })` | `{ muted }`. See [Mute and keypad](#mute-and-keypad) |

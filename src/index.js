@@ -1005,11 +1005,12 @@ class SymboDialerClient {
   }
 
   /**
-   * Save the outcome, note or call fields of a one-off or inbound call: the
-   * one waiting in its post-call step, or the call `callId` names. Resolves
-   * with `{ callId, outcomeId }`; `call.completed` follows for the call that
-   * was waiting. A session's call is saved with session.saveOutcome, unless a
-   * reload brought it back.
+   * Save the outcome, note or call fields of a call: the one waiting in its
+   * post-call step, or the call `callId` names, including a session call the
+   * frame no longer holds (after a hold or a reload). Resolves with
+   * `{ callId, outcomeId }`; `call.completed` follows for the call that was
+   * waiting. A session call in front of the rep is saved with
+   * session.saveOutcome.
    */
   saveOutcome(options = {}) {
     const given = (key) => options[key] !== undefined && options[key] !== null
