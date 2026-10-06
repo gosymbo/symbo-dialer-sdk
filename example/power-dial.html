@@ -7,6 +7,7 @@
   <!--
     A single-file reference for @symbo/dialer-embed: sign in by redirect, start a
     dial session you built in Symbo, and watch contacts move across the board.
+    Inbound calls ring here too, between sessions and while one is paused.
     From the repository: `npm run demo`, then open /example/power-dial.html.
     Add ?appUrl=http://localhost:3000/example/stub to play against the offline stub.
   -->
@@ -60,14 +61,16 @@
     .lines select { width: auto; margin: 0; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font: inherit; color: var(--ink); }
     .lines .lock { display: inline-flex; color: var(--muted); }
 
-    .live { position: sticky; bottom: 0; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
-    .live > div:first-child { margin-right: auto; }
+    .bar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    .bar > div:first-child { margin-right: auto; }
+    .live { position: sticky; bottom: 0; }
+    .ring { border-color: var(--accent); box-shadow: 0 0 0 3px #e8e8fb; }
     .timer { font-weight: 700; color: var(--live); font-variant-numeric: tabular-nums; }
     .btn.on { background: #fdeaea; border-color: var(--live); color: var(--live); }
     .keypad { display: grid; grid-template-columns: repeat(3, 36px); gap: 4px; }
     .keypad .btn { padding: 4px 0; }
     #keyed { min-width: 60px; font-variant-numeric: tabular-nums; letter-spacing: .1em; }
-    #outcomes { width: 100%; }
+    #outcomes, #callOutcomes { width: 100%; }
     #log { max-height: 220px; overflow: auto; margin-top: 10px; font: 12px/1.6 ui-monospace, monospace; color: var(--muted); }
     #log b { color: var(--ink); }
     @media (max-width: 1100px) { main { grid-template-columns: 1fr; } .board { grid-template-columns: repeat(2, 1fr); } }
@@ -107,6 +110,23 @@
     </aside>
 
     <div>
+      <!-- Compact mode rings silently: the banner and the ringtone are the page's -->
+      <section class="panel bar ring" id="incoming" hidden>
+        <div><b id="incomingWho"></b><br /><span class="muted" id="incomingFrom"></span></div>
+        <button class="btn primary" id="answer">Answer</button>
+        <button class="btn" id="ignore">Ignore</button>
+        <p class="err" id="incomingErr" style="width: 100%"></p>
+      </section>
+
+      <!-- An inbound call is not part of the session: its own bar, and its own outcome -->
+      <section class="panel bar" id="call" hidden>
+        <div><b id="callName"></b><br /><span class="muted" id="callNumber"></span></div>
+        <span class="timer" id="callTimer"></span>
+        <span class="pill" id="callState"></span>
+        <div class="row" id="callOutcomes" hidden></div>
+        <p class="err" id="callErr" style="width: 100%"></p>
+      </section>
+
       <div class="row" id="counts" style="margin-bottom: 12px"></div>
       <div class="panel row">
         <button class="btn" id="resume" disabled>Resume</button>
@@ -141,7 +161,7 @@
         <div class="column completed"><h3>Completed <span id="completedCount"></span></h3><div id="completedList"></div></div>
       </div>
 
-      <section class="panel live" id="live" hidden>
+      <section class="panel bar live" id="live" hidden>
         <div><b id="liveName"></b><br /><span class="muted" id="liveNumber"></span></div>
         <span class="timer" id="liveTimer"></span>
         <span class="pill" id="liveState"></span>
@@ -159,7 +179,7 @@
   </main>
 
   <!-- The SDK's own source, one directory up. With the published package, replace this with
-       <script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.3/dist/symbo-dialer.min.js"></script>
+       <script src="https://cdn.jsdelivr.net/npm/@symbo/dialer-embed@0.4/dist/symbo-dialer.min.js"></script>
        and pin the version you tested against. -->
   <script type="module">
     import { SymboDialer } from '../src/index.js'
@@ -182,6 +202,9 @@
     let reconciling = false
     let reconcileAgain = false
     let lines = null // what Start asks for, when the rep picked a number before starting
+    let incoming = null // the inbound call ringing
+    let call = null // the inbound call the rep took: { callId, name, number, live, postCall }
+    let callTimer = null
 
     // ⚠ Your Symbo environment. Remembered in this browser.
     const saved = JSON.parse(localStorage.getItem('power-dial') || '{}')
@@ -195,6 +218,7 @@
       if (!window.SymboDialer) return (ui.connectErr.textContent = 'The Symbo SDK did not load — check the <script> URL.')
       localStorage.setItem('power-dial', JSON.stringify({ appUrl: ui.appUrl.value, apiUrl: ui.apiUrl.value, token: ui.token.value }))
       ui.connectErr.textContent = ''
+      primeRingtone()
 
       dialer = SymboDialer.create({
         container: ui.slot,
@@ -241,6 +265,8 @@
       ending = false
       rows.clear()
       endLive()
+      hideIncoming()
+      endCall(true)
       ui.counts.innerHTML = ''
       ui.status.textContent = 'no session'
       ui.lines.hidden = true
@@ -276,10 +302,15 @@
       // Symbo never reloads the dialer for a newer version by itself; offer it when the rep is free.
       d.on('update.available', () => (ui.update.hidden = false))
       // The dialer reloaded (asked for, or not). Whatever it held is gone: a session running in it is
-      // paused on Symbo's side, and a call still waiting for its outcome has to be saved from your
-      // server (PUT /calls/{id}). Start picks the session back up.
+      // paused on Symbo's side, and a call still waiting for its outcome is saved by id, with
+      // dialer.saveOutcome({ callId }) or from your server (PUT /calls/{id}). Start picks the session
+      // back up.
       d.on('frame.reloaded', (p) => {
         ui.update.hidden = true
+        // An inbound call ringing or up went with it. One waiting for its outcome stays: saveOutcome({ callId })
+        // still saves it, and under "Require & block dialer" Symbo sends its call.postCall again.
+        hideIncoming()
+        if (call?.live) endCall()
         if (!activeSession) return
         ui.sessionInput.value = activeSession
         activeSession = null
@@ -296,7 +327,10 @@
 
       d.on('session.started', (p) => {
         activeSession = p.dialSessionId
-        ui.status.textContent = `dialing · ${linesText(p.concurrentCalls)}`
+        // dialing: false when the queue was already empty, which session.noMoreCalls has said, or when a call
+        // came up while the session loaded. An older Symbo leaves it out.
+        if (p.dialing !== false) ui.status.textContent = `dialing · ${linesText(p.concurrentCalls)}`
+        else if (ui.status.textContent !== 'queue empty') waitForResume()
         showLines()
         refresh()
         reconcile()
@@ -337,6 +371,16 @@
         const row = [...rows.values()].find((r) => r.callId === p.callId)
         if (row) update(row, { outcome: p.outcome?.name })
       })
+
+      // Symbo offers an inbound call whenever the rep could take it: between sessions, while one is paused,
+      // and over a call (End & Accept). Never while the engine is dialing.
+      d.on('call.incoming', showIncoming)
+      d.on('call.ended', (p) => {
+        if (incoming?.callId === p.callId) hideIncoming() // ignored, rang out, the caller hung up, or a session dialed over it
+        // A call that failed, or that another rep answered first, has no post-call step.
+        if (call?.callId === p.callId) ['failed', 'busy', 'answered_elsewhere'].includes(p.reason) ? endCall() : callEnded()
+      })
+      d.on('call.postCall', onCallPostCall)
     }
 
     /* ── The board ───────────────────────────────────────────────────── */
@@ -498,7 +542,7 @@
       ui.live.hidden = false
       const started = Date.now()
       clearInterval(timer)
-      timer = setInterval(() => (ui.liveTimer.textContent = new Date(Date.now() - started).toISOString().slice(14, 19)), 500)
+      timer = setInterval(() => (ui.liveTimer.textContent = clock(Date.now() - started)), 500)
     }
 
     function endLive() {
@@ -543,8 +587,9 @@
       })
     }
 
-    // After the post-call step: finish an End pressed during the call, dial on, or wait for the rep to press Resume.
-    const nextStep = () => (ending ? 'end' : ui.autoResume.checked ? 'resume' : 'pause')
+    // After the post-call step: finish an End pressed during the call, dial on (not while an inbound call rings or is
+    // up: End & Accept ends the session call before it answers), or wait for the rep to press Resume.
+    const nextStep = () => (ending ? 'end' : ui.autoResume.checked && !call?.live && !incoming ? 'resume' : 'pause')
     const waitForResume = () => activeSession && (ui.status.textContent = 'paused · press Resume to dial on')
 
     // With no outcome to save, the next step is a command of its own.
@@ -562,11 +607,176 @@
           headers: { authorization: `Bearer ${ui.token.value.trim()}` },
         })
         if (!res.ok) throw new Error(`${res.status} loading outcomes`)
-        outcomes = (await res.json()).data || []
+        outcomes = ((await res.json()).data || []).filter((o) => !o.system_only) // Symbo applies those itself
+        if (call?.postCall && !call.live) onCallPostCall(call.postCall) // one brought back with ready, before the list
       } catch (error) {
         ui.connectErr.textContent = `Could not load outcomes — ${error.message}`
       }
     }
+
+    /* ── Inbound calls ───────────────────────────────────────────────── */
+
+    function showIncoming(p) {
+      incoming = p
+      ui.incomingWho.textContent = p.prospectName ? `${p.prospectName} is calling` : 'Incoming call'
+      ui.incomingFrom.textContent = p.from
+      ui.incomingErr.textContent = ''
+      ui.incoming.hidden = false
+      startRinging()
+      refresh()
+    }
+
+    function hideIncoming() {
+      incoming = null
+      ui.incoming.hidden = true
+      stopRinging()
+      refresh()
+    }
+
+    ui.answer.onclick = () => busy(ui.answer, async () => {
+      const ringing = incoming
+      if (!ringing) return
+      ui.incomingErr.textContent = ''
+      try {
+        const answered = await dialer.answerIncoming().catch(endAndAccept)
+        if (!answered) return
+        hideIncoming()
+        startCall({ callId: answered.callId || ringing.callId, name: ringing.prospectName || 'Inbound call', number: ringing.from })
+      } catch (error) {
+        showError(ui.incomingErr, error)
+      }
+    })
+
+    // Answer over a call is refused: SESSION_ACTIVE with a session call in front of the rep (connected, or in its
+    // post-call step), CALL_IN_PROGRESS over another inbound call. Symbo's End & Accept ends that call and answers;
+    // a session call goes to its post-call step and the session pauses with session.paused { reason: 'incoming' }.
+    function endAndAccept(error) {
+      const onCall = error.code === 'SESSION_ACTIVE' || error.code === 'CALL_IN_PROGRESS'
+      if (!onCall || !dialer.hasCapability('callWaiting')) throw error
+      // It may stop ringing while the prompt is open.
+      if (!confirm('You are on a call. End it and answer this one?') || !incoming) return null
+      return dialer.answerIncoming({ endCurrent: true })
+    }
+    ui.ignore.onclick = () => busy(ui.ignore, async () => {
+      try {
+        await dialer.ignoreIncoming() // call.ended { reason: 'cancelled' } follows
+        hideIncoming()
+      } catch (error) {
+        showError(ui.incomingErr, error)
+      }
+    })
+
+    // A call still waiting for its outcome is kept as `earlier`: Symbo drops its step, but saveOutcome({ callId })
+    // still saves it.
+    function startCall(c) {
+      call = { ...c, live: true, earlier: call && !call.live && call.postCall ? call : null }
+      ui.callName.textContent = c.name
+      ui.callNumber.textContent = c.number
+      pill(ui.callState, 'connected', 'bad')
+      ui.callOutcomes.hidden = true
+      ui.callErr.textContent = ''
+      ui.call.hidden = false
+      const started = Date.now()
+      clearInterval(callTimer)
+      callTimer = setInterval(() => (ui.callTimer.textContent = clock(Date.now() - started)), 500)
+      refresh()
+    }
+
+    function callEnded() {
+      if (!call?.live) return
+      call.live = false
+      clearInterval(callTimer)
+      ui.callTimer.textContent = ''
+      pill(ui.callState, 'ended')
+      refresh() // call.postCall follows
+    }
+
+    // Compact mode has no outcome form for a call outside the session, so this is it. After a reload it can be a
+    // call this page never saw ring.
+    function onCallPostCall(p) {
+      if (call?.live && call.callId !== p.callId) return // End & Accept took a new call over it; Symbo drops its step, or sets it aside
+      if (call?.callId !== p.callId) call = { callId: p.callId, name: 'Last call', number: '', live: false }
+      callEnded()
+      call.postCall = p
+      ui.callNumber.textContent = `${p.answered ? 'answered' : 'not answered'} · ${p.durationSeconds || 0}s`
+      pill(ui.callState, p.outcomeRequired ? 'outcome needed' : 'ended', p.outcomeRequired ? 'warn' : '')
+      // An older Symbo release has no saveOutcome(): your server saves it with PUT /calls/{id}.
+      const canSave = dialer.hasCapability('saveOutcome')
+      const buttons = canSave ? outcomes.map((o) => `<button class="btn" data-id="${esc(o.id)}">${esc(o.name)}</button>`) : []
+      if (!buttons.length || !p.outcomeRequired) buttons.push('<button class="btn" data-close>Close</button>')
+      ui.callOutcomes.innerHTML = buttons.join('')
+      ui.callErr.textContent = !canSave
+        ? `Save its outcome from your server: PUT /calls/${p.callId}`
+        : outcomes.length ? '' : 'No outcomes loaded — add your API token and reconnect.'
+      ui.callName.textContent = call.name
+      ui.callOutcomes.hidden = ui.call.hidden = false
+      refresh()
+    }
+
+    ui.callOutcomes.onclick = (event) => {
+      const button = event.target.closest('button')
+      if (!button || !call?.postCall) return
+      if ('close' in button.dataset) return endCall()
+      const { callId } = call
+      const buttons = ui.callOutcomes.querySelectorAll('button')
+      busy(button, async () => {
+        buttons.forEach((b) => (b.disabled = true)) // one outcome at a time
+        try {
+          await dialer.saveOutcome({ callId, outcomeId: button.dataset.id }) // call.completed follows
+          if (call?.callId === callId) endCall()
+        } catch (error) {
+          showError(ui.callErr, error)
+        } finally {
+          buttons.forEach((b) => (b.disabled = false))
+        }
+      })
+    }
+
+    function endCall(all = false) {
+      clearInterval(callTimer)
+      const earlier = all ? null : call?.earlier
+      call = null
+      ui.call.hidden = true
+      if (earlier) {
+        call = earlier
+        onCallPostCall(earlier.postCall)
+      }
+      refresh()
+    }
+
+    // The page's ringtone: a short beep every two seconds.
+    let audio = null
+    let ringTimer = null
+
+    // Safari plays audio only from a context started in a click, so start it on Connect.
+    function primeRingtone() {
+      try {
+        audio = audio || new AudioContext()
+      } catch {
+        // No audio in this browser; the banner still shows.
+      }
+    }
+
+    function startRinging() {
+      stopRinging()
+      try {
+        audio = audio || new AudioContext()
+        const beep = () => {
+          const tone = audio.createOscillator()
+          const gain = audio.createGain()
+          tone.frequency.value = 880
+          gain.gain.value = 0.05
+          tone.connect(gain).connect(audio.destination)
+          tone.start()
+          tone.stop(audio.currentTime + 0.4)
+        }
+        beep()
+        ringTimer = setInterval(beep, 2000)
+      } catch {
+        // No audio in this browser; the banner still shows.
+      }
+    }
+    const stopRinging = () => clearInterval(ringTimer)
 
     /* ── Lines ───────────────────────────────────────────────────────── */
 
@@ -657,7 +867,8 @@
         throw error
       }))
     })
-    command(ui.hangup, () => untilDropped(liveId, dialer.hangUp()))
+    // Hangs up an inbound call too, when one is up.
+    command(ui.hangup, () => untilDropped(call?.live ? null : liveId, dialer.hangUp()))
     command(ui.mute, () => dialer.setMuted(!dialer.muted)) // call.muteChanged redraws the button
     command(ui.end, async () => {
       if (!confirm('End this dial session? Symbo marks it completed.')) return
@@ -693,12 +904,16 @@
       const enable = (button, on) => (button.disabled = !on || button.classList.contains('busy'))
       enable(ui.connect, !dialer)
       enable(ui.start, dialer?.ready && ui.sessionInput.value.trim() && !activeSession)
-      for (const button of [ui.skip, ui.hangup, ui.end]) enable(button, activeSession)
+      for (const button of [ui.skip, ui.end]) enable(button, activeSession)
+      enable(ui.hangup, activeSession || call?.live)
       ui.mute.hidden = !!dialer?.ready && !dialer.hasCapability('mute') // an older Symbo release has no mute command
       // Mute while talking to someone; unmute whenever muted. The rep's line can be down at other times
       // (after Hang up or a pause), and Symbo would answer NO_ACTIVE_CALL.
-      enable(ui.mute, activeSession && dialer.hasCapability('mute') && ((liveId && !postCall) || dialer.muted))
-      enable(ui.resume, activeSession && !postCall) // save the outcome first
+      const talking = (activeSession && liveId && !postCall) || call?.live
+      enable(ui.mute, dialer?.ready && dialer.hasCapability('mute') && (talking || dialer.muted))
+      enable(ui.resume, activeSession && !postCall && !call?.live) // save the outcome first, and finish an inbound call
+      enable(ui.answer, incoming)
+      enable(ui.ignore, incoming && !ui.answer.classList.contains('busy'))
     }
 
     // Spinner on a button while its action runs.
@@ -726,6 +941,7 @@
       el.className = `pill ${tone}`
     }
 
+    const clock = (ms) => new Date(ms).toISOString().slice(14, 19)
     const showError = (el, error) => (el.textContent = `${error.code || 'Error'} — ${error.message}`)
     const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)
   </script>
