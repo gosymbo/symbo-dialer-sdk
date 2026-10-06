@@ -5,11 +5,15 @@
 // integration) can be built with no Symbo account and no network. It answers
 // every command the SDK knows, replays a power-dial session (two lines unless
 // you set another number) through three rounds of dialing, rings an inbound
-// call while idle, lists a pair of audio devices, mutes and plays keypad
-// digits on the call that is up, and raises a warning on request. Add
-// `lockLines=2` to the frame URL to play an organization that fixes every
-// session's number of lines, and `updateAfter=5000` to announce a newer Symbo
-// build that many milliseconds after `ready`.
+// call while idle (and on request whenever the engine is not dialing), lists a
+// pair of audio devices, mutes and plays keypad digits on the call that is
+// up, and raises a warning on request. Add `lockLines=2` to the frame URL to
+// play an organization that fixes every session's number of lines,
+// `updateAfter=5000` to announce a newer Symbo build that many milliseconds
+// after `ready`, and `blockDialer=1` to play "Require & block dialer" (a one-off
+// or inbound call's outcome must be saved before the next dial or before a
+// session dials on, and the last call still waiting for its outcome, a
+// session's included, survives a reload).
 //
 // Timings are compressed: legs ring for a second or two, calls last a few
 // seconds. Everything else — the message names, payload shapes, refusal codes
@@ -28,6 +32,11 @@
   const MODE = MODES.includes(params.get('mode')) ? params.get('mode') : 'widget'
   const SIZES = { widget: { width: 420, height: 485 }, compact: { width: 360, height: 56 } }
   const STORAGE_KEY = 'symbo-stub:signedIn'
+  // What survives a reload: the last call still waiting for its outcome
+  // under "Require & block dialer", one-off or the session's, and why the
+  // last document left.
+  const PENDING_CALL_KEY = 'symbo-stub:pendingCall'
+  const LEAVING_KEY = 'symbo-stub:leavingReason'
   const MIN_LINES = 1
   const MAX_LINES = 4
   const isLines = (n) => Number.isInteger(n) && n >= MIN_LINES && n <= MAX_LINES
@@ -41,15 +50,19 @@
       return new URLSearchParams()
     }
   })()
-  const lockParam = params.get('lockLines') ?? embedderParams.get('lockLines')
+  const param = (name) => params.get(name) ?? embedderParams.get(name)
+  const lockParam = param('lockLines')
   // A newer build, announced this long after ready (never, by default).
-  const updateAfterMs = Number(params.get('updateAfter') ?? embedderParams.get('updateAfter'))
+  const updateAfterMs = Number(param('updateAfter'))
   let updateAvailable = false
   const LOCKED_LINES = isLines(Number(lockParam)) ? Number(lockParam) : null
+  // The organization's "Require & block dialer" setting.
+  const BLOCK_DIALER = param('blockDialer') === '1'
   // Guess: the demo session was created with two lines. A session created
   // without a number rings one, which is what `ready` reports before one runs.
   const DEMO_SESSION_LINES = 2
   const concurrentCalls = () => LOCKED_LINES ?? session?.lines ?? MIN_LINES
+  const MAX_QUEUED_CALL_IDS = 1000
 
   const USER = { id: 'u-1', name: 'Sam Rep', email: 'sam@partner.test' }
   const ORGANIZATION = { id: 'o-1', name: 'Acme Collections' }
@@ -76,6 +89,11 @@
     'o-no-answer': { name: 'No answer', group: 'unanswered' },
     'o-busy': { name: 'Busy', group: 'unanswered' },
   }
+  const resolveOutcomeId = (outcomeId, outcomeValue) =>
+    outcomeId ||
+    Object.keys(OUTCOMES).find(
+      (id) => OUTCOMES[id].name.toLowerCase() === String(outcomeValue || '').toLowerCase()
+    )
 
   // What happens to each queued call once it is dialled: who picks up, and
   // after how long. With two lines the first round rings q-1 and q-2 and q-2
@@ -95,6 +113,10 @@
   const INBOUND_REPEAT_MS = 40000
   const INBOUND_RING_MS = 20000
   const CONNECTED_CALL_MS = 6000
+  // How long dial() waits for the calling device to register, and how often
+  // a reload or sign-out that has to wait checks whether the rep is free.
+  const DEVICE_WAIT_MS = 10000
+  const IDLE_POLL_MS = 5000
   // The keypad: what one sendDigits may carry, and how far apart the frame
   // plays the digits.
   const DTMF_DIGITS = /^[0-9*#]{1,32}$/
@@ -108,6 +130,21 @@
   let readyAnnounced = false
   let seq = 0
   let deviceReady = false
+  let dialInFlight = false
+  // Set once the frame has asked to reload (reload.required).
+  let reloadRequired = null
+  // 'reloading' or 'signingOut' once this document is on its way out. Like the
+  // real frame, it then sends nothing but answers, and refuses every command
+  // except the one already under way.
+  let leaving = null
+  // Why the last document left, for the first ready or auth.required of this one.
+  let reloadReason = localStorage.getItem(LEAVING_KEY)
+  localStorage.removeItem(LEAVING_KEY)
+  const takeReloadReason = () => {
+    const reason = reloadReason
+    reloadReason = null
+    return reason
+  }
 
   const devices = {
     microphones: [
@@ -126,13 +163,31 @@
   // One-off / inbound call, if any.
   let call = null
   let incoming = null
+  // One-off calls that have ended, by id, so an outcome can be saved for any
+  // of them; and the one still waiting for its outcome, if any.
+  const endedCalls = new Map()
+  let pendingOneOff = null
+  if (BLOCK_DIALER) {
+    try {
+      pendingOneOff = JSON.parse(localStorage.getItem(PENDING_CALL_KEY))
+    } catch {
+      pendingOneOff = null
+    }
+    if (pendingOneOff) {
+      pendingOneOff.restored = true
+      endedCalls.set(pendingOneOff.callId, pendingOneOff)
+    }
+  }
 
-  // The power-dial session, if any.
+  // The power-dial session, if any, and sessions parked with session.hold(),
+  // by id, which session.start picks up where they were.
   let session = null
+  const heldSessions = new Map()
 
   // The rep's line: a one-off or inbound call while it lasts or, in a
-  // session, the rep's own leg. That leg drops when the rep hangs up or
-  // pauses, and resuming brings it back. Mute lasts as long as the line.
+  // session, the rep's own leg. That leg drops when the rep hangs up, pauses
+  // or holds, and when the session ends; resuming brings it back. Mute lasts
+  // as long as the line.
   // Guess: it stays up when the contact hangs up, and drops on a skip.
   let sessionLine = false
   let muted = false
@@ -155,9 +210,27 @@
     timers.add(id)
     return id
   }
+  // The session's own dialing, stopped when it ends or is held without
+  // touching a one-off call's timers.
+  const sessionTimers = new Set()
+  const sessionLater = (ms, fn) => {
+    const id = setTimeout(() => {
+      sessionTimers.delete(id)
+      fn()
+    }, ms)
+    sessionTimers.add(id)
+    return id
+  }
+  const cancelSessionTimers = () => {
+    sessionTimers.forEach(clearTimeout)
+    sessionTimers.clear()
+  }
+  // Everything stops: the document is about to reload.
   const cancelTimers = () => {
     timers.forEach(clearTimeout)
     timers.clear()
+    cancelSessionTimers()
+    clearTimeout(inboundTimer)
   }
 
   const nextId = (prefix) => `${prefix}-${++seq}`
@@ -165,6 +238,7 @@
   /* --------------------------------------------------------------- posting */
 
   const post = (type, payload = {}) =>
+    (!leaving || type === 'symbo:result') &&
     parent.postMessage({ type, payload, protocolVersion: V }, parentOrigin || '*')
 
   const ok = (msg, data = {}) =>
@@ -194,14 +268,21 @@
     }
   }
 
+  // Like the real frame, a page that has not heard ready yet is told only
+  // that nobody is signed in; other warnings wait for ready, and only the
+  // ones the page heard are cleared to it.
+  const sentWarnings = new Set()
   const raiseWarning = (code, message) => {
     warnings.set(code, message)
-    post('symbo:warning', { code, message })
+    if (readyAnnounced || code === 'NOT_SIGNED_IN') {
+      sentWarnings.add(code)
+      post('symbo:warning', { code, message })
+    }
     render()
   }
   const clearWarning = (code) => {
     if (!warnings.delete(code)) return
-    post('symbo:warning.cleared', { code })
+    if (sentWarnings.delete(code)) post('symbo:warning.cleared', { code })
     render()
   }
 
@@ -219,12 +300,35 @@
       mode: MODE,
       // Illustrative. The real frame's list is published with the Symbo
       // release that carries each feature.
-      capabilities: ['dial', 'session', 'inbound', 'audioDevices', 'signIn', 'signOut', 'concurrentCalls', 'reload', 'mute', 'dtmf'],
+      capabilities: [
+        'dial',
+        'session',
+        'inbound',
+        'audioDevices',
+        'signIn',
+        'signOut',
+        'concurrentCalls',
+        'reload',
+        'mute',
+        'dtmf',
+        'callsWhilePaused',
+        'sessionHold',
+        'sessionLoad',
+        'removeQueuedCalls',
+        'callWaiting',
+        'saveOutcome',
+        'hardReload',
+      ],
       deviceReady,
       powerDialing: true,
       concurrentCalls: concurrentCalls(),
       concurrentCallsLocked: LOCKED_LINES !== null,
       updateAvailable,
+      reloadReason: takeReloadReason(),
+    })
+    warnings.forEach((message, code) => {
+      sentWarnings.add(code)
+      post('symbo:warning', { code, message })
     })
     // Like the real frame, a newer build is only announced: the page decides
     // when to reload for it.
@@ -235,6 +339,8 @@
       })
     }
     if (SIZES[MODE]) post('symbo:resize', SIZES[MODE])
+    // The call still waiting for its outcome when the last document left.
+    if (pendingOneOff?.restored) post('symbo:call.postCall', postCallView(pendingOneOff))
 
     // The calling device registers a moment after sign-in.
     if (!deviceReady) {
@@ -242,6 +348,7 @@
         deviceReady = true
         post('symbo:device.ready', {})
         clearWarning('DEVICE_NOT_READY')
+        deviceWaiters.splice(0).forEach((settle) => settle(true))
         render()
       })
     }
@@ -256,7 +363,7 @@
       `../login/?guest=${Math.random().toString(36).slice(2, 10)}`,
       location.href
     ).href
-    post('symbo:auth.required', { loginUrl })
+    post('symbo:auth.required', { loginUrl, reloadReason: takeReloadReason() })
     raiseWarning('NOT_SIGNED_IN', 'No Symbo user is signed in.')
   }
 
@@ -267,23 +374,79 @@
     if (e.data === 'signed-in') location.reload()
   })
 
-  const signOut = () => {
+  /* --------------------------------------------------------------- leaving */
+
+  // What leaving this document would cut off, as [code, message], or null. A
+  // reload in compact or hidden mode is not held up by an unsaved outcome:
+  // the reloaded frame brings that call back.
+  const busyRefusal = (doing, { reloading = false } = {}) => {
+    if (session) return ['SESSION_ACTIVE', `A power-dial session is running. End it before ${doing}.`]
+    if (call || incoming) {
+      return ['CALL_IN_PROGRESS', `A call is active or ringing. Hang up or ignore it before ${doing}.`]
+    }
+    if (BLOCK_DIALER && pendingOneOff && !(reloading && MODE !== 'widget')) {
+      return ['POSTCALL_DETAILS_REQUIRED', `The last call still needs an outcome. Save it before ${doing}.`]
+    }
+    return null
+  }
+
+  // Run `go` once `blocked()` is false: now, or on a poll, like the real frame.
+  const whenFree = (blocked, go) => {
+    const poll = () => (blocked() ? later(IDLE_POLL_MS, poll) : go())
+    poll()
+  }
+
+  // A reload or sign-out nobody asked for: announced, with how long until it
+  // happens, and remembered for the next document's ready or auth.required.
+  const leave = (reason, inMs) => {
+    post('symbo:frame.leaving', { reason, inMs })
+    leaving = reason === 'plan_changed' ? 'reloading' : 'signingOut'
+    localStorage.setItem(LEAVING_KEY, reason)
+    cancelTimers()
+    later(inMs, () => location.reload())
+  }
+
+  // The rep's plan or seats changed: the frame has to reload, and does so by
+  // itself once nothing would be cut off, a dial being placed included.
+  // reload() from the page also works.
+  const requireReload = (reason) => {
+    if (!signedIn || reloadRequired) return
+    reloadRequired = reason
+    post('symbo:reload.required', { reason })
+    whenFree(
+      () => dialInFlight || !!busyRefusal('reloading', { reloading: true }),
+      () => leave(reason, 1000)
+    )
+  }
+
+  // Another Symbo frame on the site signed the rep out. Followed at once, even
+  // mid-call, as signing out in one tab signs out the others.
+  const signedOutElsewhere = () => {
+    if (!signedIn || leaving) return
     localStorage.removeItem(STORAGE_KEY)
-    location.reload()
+    leave('signed_out_elsewhere', 600)
+  }
+
+  // The rep signs out from the strip: Symbo's own logout.
+  const signOutFromStrip = () => {
+    localStorage.removeItem(STORAGE_KEY)
+    leave('logout', 600)
   }
 
   /* ------------------------------------------------------------ state view */
 
+  const noCounts = () => ({
+    queued: 0,
+    dialing: 0,
+    attempted: 0,
+    completed: 0,
+    cancelled: 0,
+    removed: 0,
+    remaining: 0,
+  })
+
   const counts = () => {
-    const c = {
-      queued: 0,
-      dialing: 0,
-      attempted: 0,
-      completed: 0,
-      cancelled: 0,
-      removed: 0,
-      remaining: 0,
-    }
+    const c = noCounts()
     if (!session) return c
     session.queue.forEach((row) => {
       c[row.status] = (c[row.status] || 0) + 1
@@ -318,6 +481,19 @@
     ...extra,
   })
 
+  // A one-off call in its post-call step. `dialedAt` is only sent for a call
+  // a reload brought back.
+  const postCallView = (pending) => ({
+    callId: pending.callId,
+    prospectId: pending.prospectId,
+    answered: pending.answered,
+    durationSeconds: pending.durationSeconds,
+    outcomeRequired: true,
+    blocksDialing: BLOCK_DIALER,
+    restored: !!pending.restored,
+    dialedAt: pending.restored ? pending.dialedAt : null,
+  })
+
   const stateView = () => ({
     signedIn,
     deviceReady,
@@ -343,7 +519,18 @@
           prospectId: call.prospectId,
           number: call.number,
         }
-      : null,
+      : pendingOneOff
+        ? {
+            callId: pendingOneOff.callId,
+            status: 'post_call',
+            prospectId: pendingOneOff.prospectId,
+            number: pendingOneOff.number,
+            durationSeconds: pendingOneOff.durationSeconds,
+            dialedAt: pendingOneOff.restored ? pendingOneOff.dialedAt : null,
+            blocksDialing: BLOCK_DIALER,
+            restored: !!pendingOneOff.restored,
+          }
+        : null,
     muted,
     incoming: incoming
       ? {
@@ -354,6 +541,7 @@
         }
       : null,
     warnings: [...warnings.keys()],
+    reloadRequired,
   })
 
   // Every change reaches the page, whoever made it.
@@ -364,9 +552,10 @@
     render()
   }
 
+  // A one-off call placed while the session's line was down keeps its mute.
   const dropSessionLine = () => {
     sessionLine = false
-    setMuted(false)
+    if (!call) setMuted(false)
   }
 
   const queueUpdated = () =>
@@ -383,6 +572,11 @@
   const sessionRinging = () =>
     session ? [...session.legs.values()].filter((l) => l.status === 'ringing') : []
 
+  // The session has the rep's line: it is dialing, or one of its calls is in
+  // front of the rep (connected, or waiting for its outcome).
+  const sessionOwnsLine = () =>
+    !!session && (session.status === 'dialing' || !!sessionConnected() || !!session.postCall)
+
   const endLeg = (leg, reason, rowStatus) => {
     session.legs.delete(leg.queuedCallId)
     const row = session.queue.find((r) => r.queuedCallId === leg.queuedCallId)
@@ -392,38 +586,72 @@
     post('symbo:session.leg.ended', legView(leg))
   }
 
-  const startSession = (dialSessionId, lines) => {
-    sessionLine = true
+  // Asked to dial, the engine dismisses an inbound call still ringing before
+  // it looks at the queue.
+  const dismissIncoming = () => {
+    if (!incoming) return
+    const dismissed = incoming
+    incoming = null
+    post('symbo:call.ended', { callId: dismissed.callId, reason: 'cancelled', durationSeconds: 0 })
+  }
+
+  // What the engine does before it dials: an inbound call still ringing is
+  // dismissed, and a one-off call's unsaved post-call step is dropped (under
+  // "Require & block dialer" the session refuses to dial on before that).
+  const clearTheWayToDial = () => {
+    dismissIncoming()
+    clearPendingOneOff()
+  }
+
+  // `dial: false` loads the session paused, its line down, as Symbo does on
+  // page load; a resume dials it.
+  const startSession = (dialSessionId, lines, { dial = true, queue } = {}) => {
     session = {
       dialSessionId,
       lines,
-      status: 'dialing',
+      status: 'paused',
       legs: new Map(),
       postCall: null,
-      queue: SCRIPT.map((s, i) => ({
-        queuedCallId: s.queuedCallId,
-        prospectId: s.prospectId,
-        status: 'queued',
-        order: i + 1,
-        attempts: 0,
-        lastCallId: null,
-        lastOutcomeId: null,
-      })),
+      queue:
+        queue ??
+        SCRIPT.map((s, i) => ({
+          queuedCallId: s.queuedCallId,
+          prospectId: s.prospectId,
+          status: 'queued',
+          order: i + 1,
+          attempts: 0,
+          lastCallId: null,
+          lastOutcomeId: null,
+        })),
+    }
+    if (dial) dismissIncoming()
+    const dialing = dial && session.queue.some((r) => r.status === 'queued')
+    if (dialing) {
+      clearPendingOneOff()
+      sessionLine = true
+      session.status = 'dialing'
+    } else if (dial) {
+      // An empty queue: session.noMoreCalls goes out before session.started.
+      dialNextRound()
     }
     post('symbo:session.started', {
       dialSessionId,
       concurrentCalls: concurrentCalls(),
       concurrentCallsLocked: LOCKED_LINES !== null,
+      dialing,
     })
     queueUpdated()
-    dialNextRound()
+    if (dialing) dialNextRound()
+    render()
+    return dialing
   }
 
   // Dial on. A queue that has run out is announced by noMoreCalls alone: the
   // engine never resumed.
   const resumeDialing = () => {
-    sessionLine = true
     if (session.queue.some((r) => r.status === 'queued')) {
+      clearTheWayToDial()
+      sessionLine = true
       post('symbo:session.resumed', { dialSessionId: session.dialSessionId })
     }
     dialNextRound()
@@ -437,9 +665,16 @@
     const rows = session.queue.filter((r) => r.status === 'queued').slice(0, concurrentCalls())
 
     if (rows.length === 0) {
-      const dialSessionId = session.dialSessionId
-      post('symbo:session.noMoreCalls', { dialSessionId, counts: counts() })
-      finishSession()
+      // The session stays loaded and paused, its contacts still reserved,
+      // until it is ended or held. The rep's line drops.
+      session.status = 'paused'
+      post('symbo:session.noMoreCalls', {
+        dialSessionId: session.dialSessionId,
+        counts: counts(),
+        sessionOpen: true,
+      })
+      dropSessionLine()
+      render()
       return
     }
 
@@ -455,18 +690,19 @@
         status: 'ringing',
         reason: null,
         startedAt: null,
+        dialedAt: new Date().toISOString(),
       }
       row.status = 'dialing'
       row.attempts += 1
       row.lastCallId = leg.callId
       session.legs.set(row.queuedCallId, leg)
 
-      later(200 * i, () => {
+      sessionLater(200 * i, () => {
         if (!session || !session.legs.has(leg.queuedCallId)) return
         post('symbo:session.leg.ringing', legView(leg))
       })
 
-      later(200 * i + script.after, () => {
+      sessionLater(200 * i + script.after, () => {
         if (!session || session.legs.get(leg.queuedCallId) !== leg) return
         if (leg.status !== 'ringing') return
 
@@ -502,7 +738,7 @@
     render()
 
     // The far end hangs up after a while if the rep does not.
-    later(CONNECTED_CALL_MS, () => {
+    sessionLater(CONNECTED_CALL_MS, () => {
       if (session && sessionConnected() === leg) hangUpConnectedLeg('completed')
     })
   }
@@ -522,6 +758,22 @@
       outcomeRequired: true,
     }
     post('symbo:session.postCall', session.postCall)
+    // A reload brings it back like a one-off call, as the real frame does.
+    if (BLOCK_DIALER) {
+      localStorage.setItem(
+        PENDING_CALL_KEY,
+        JSON.stringify({
+          callId: leg.callId,
+          prospectId: leg.prospectId,
+          number: PROSPECTS[leg.prospectId].number,
+          externalId: null,
+          answered: true,
+          durationSeconds,
+          dialedAt: leg.dialedAt,
+          restored: false,
+        })
+      )
+    }
     queueUpdated()
     render()
   }
@@ -531,18 +783,24 @@
   const afterLegSettled = () => {
     if (!session || session.status !== 'dialing') return
     if (sessionRinging().length > 0 || sessionConnected()) return
-    later(400, dialNextRound)
+    sessionLater(400, dialNextRound)
+  }
+
+  // The session is over, or parked: its dialing stops, and the rep's line
+  // drops after the event that says so.
+  const unloadSession = (event, payload) => {
+    session = null
+    cancelSessionTimers()
+    post(event, payload)
+    dropSessionLine()
+    render()
+    scheduleInbound(INBOUND_AFTER_IDLE_MS)
   }
 
   const finishSession = () => {
     const payload = { dialSessionId: session.dialSessionId, counts: counts() }
     session.status = 'ended'
-    post('symbo:session.ended', payload)
-    session = null
-    cancelTimers()
-    dropSessionLine()
-    render()
-    scheduleInbound(INBOUND_AFTER_IDLE_MS)
+    unloadSession('symbo:session.ended', payload)
   }
 
   /* ---------------------------------------------------------------- inbound */
@@ -550,13 +808,15 @@
   let inboundTimer = null
   const scheduleInbound = (ms) => {
     clearTimeout(inboundTimer)
-    inboundTimer = setTimeout(ringInbound, ms)
+    inboundTimer = setTimeout(() => ringInbound({ auto: true }), ms)
   }
 
-  const ringInbound = () => {
-    // The frame ignores inbound calls while a session is active or a call is
-    // up; they follow the rep's normal no-answer routing instead.
-    if (!signedIn || session || call || incoming) {
+  // The demo rings by itself only while the rep is idle. On request it rings
+  // whenever the real frame would offer the call: during a call or a paused
+  // session, but not while the engine is dialing, and one at a time.
+  const ringInbound = ({ auto = false } = {}) => {
+    const busy = auto ? !!(session || call) : session?.status === 'dialing'
+    if (!signedIn || incoming || busy) {
       scheduleInbound(INBOUND_REPEAT_MS)
       return
     }
@@ -573,7 +833,7 @@
     later(INBOUND_RING_MS, () => {
       if (incoming !== ringing) return
       incoming = null
-      post('symbo:call.ended', { callId: ringing.callId, reason: 'missed', durationSeconds: 0 })
+      post('symbo:call.ended', { callId: ringing.callId, reason: 'cancelled', durationSeconds: 0 })
       render()
       scheduleInbound(INBOUND_REPEAT_MS)
     })
@@ -581,6 +841,15 @@
 
   /* --------------------------------------------------------- one-off calls */
 
+  const clearPendingOneOff = () => {
+    pendingOneOff = null
+    localStorage.removeItem(PENDING_CALL_KEY)
+  }
+
+  // The call ends in its post-call step. Its outcome is saved with
+  // call.saveOutcome (dialer.saveOutcome() in the SDK), which sends
+  // call.completed, or from the partner's server with PUT /calls/{id}. Under
+  // "Require & block dialer" it survives a reload until then.
   const finishOneOffCall = (reason) => {
     const ended = call
     call = null
@@ -588,25 +857,120 @@
       ? Math.round((Date.now() - ended.startedAt) / 1000)
       : 0
     post('symbo:call.ended', { callId: ended.callId, reason, durationSeconds })
-    post('symbo:call.postCall', {
+    pendingOneOff = {
       callId: ended.callId,
       prospectId: ended.prospectId,
+      number: ended.number,
+      externalId: ended.externalId,
       answered: !!ended.startedAt,
       durationSeconds,
-      outcomeRequired: true,
-    })
+      dialedAt: ended.dialedAt,
+      restored: false,
+    }
+    endedCalls.set(ended.callId, pendingOneOff)
+    if (BLOCK_DIALER) localStorage.setItem(PENDING_CALL_KEY, JSON.stringify(pendingOneOff))
+    post('symbo:call.postCall', postCallView(pendingOneOff))
     setMuted(false)
     render()
-
-    // And that is the end of it. A one-off or inbound call has no outcome
-    // form in embed mode and no command to save one: the partner's server
-    // does it with PUT /calls/:id, so no call.completed reaches the page.
-    // The stub used to fabricate one here, which taught the example page to
-    // expect an event the real frame never sends.
     scheduleInbound(INBOUND_AFTER_IDLE_MS)
   }
 
+  // Why a dial cannot go out now, as [code, message], or null.
+  const dialRefusal = () => {
+    if (sessionOwnsLine()) {
+      return [
+        'SESSION_ACTIVE',
+        'A power-dial session is dialing or has a call in front of the rep. Pause the session, or finish its post-call step, before dialing.',
+      ]
+    }
+    if (lineUp()) return ['CALL_IN_PROGRESS', 'A call is already active. Hang up before dialing again.']
+    if (BLOCK_DIALER && pendingOneOff) {
+      return ['POSTCALL_DETAILS_REQUIRED', 'Save the outcome of the last call before dialing again.']
+    }
+    return null
+  }
+
+  // Under "Require & block dialer" a session does not dial on over a one-off
+  // or inbound call that still owes its outcome, as dial() does not: dialing
+  // on would drop that call's post-call step. Under other settings it goes
+  // ahead and drops it. The real frame asks Symbo first, so an outcome saved
+  // with PUT /calls/{id} counts; the stub has no server.
+  const owedOutcomeRefusal = () =>
+    BLOCK_DIALER && pendingOneOff
+      ? ['POSTCALL_DETAILS_REQUIRED', 'A call still needs its outcome. Save it with dialer.saveOutcome() before dialing on.']
+      : null
+
+  // dial() before the device has registered waits for it, up to
+  // DEVICE_WAIT_MS, as the real frame does.
+  const deviceWaiters = []
+  const waitForDevice = (done) => {
+    const timer = setTimeout(() => settle(false), DEVICE_WAIT_MS)
+    const settle = (ready) => {
+      clearTimeout(timer)
+      const i = deviceWaiters.indexOf(settle)
+      if (i >= 0) deviceWaiters.splice(i, 1)
+      done(ready)
+    }
+    deviceWaiters.push(settle)
+  }
+
+  const placeCall = (msg, target, externalId) => {
+    // Under plain "Require" the next dial drops the last call's unsaved
+    // post-call step.
+    clearPendingOneOff()
+    call = {
+      callId: nextId('call'),
+      status: 'dialing',
+      externalId: externalId ?? null,
+      startedAt: null,
+      dialedAt: new Date().toISOString(),
+      ...target,
+    }
+    const { callId } = call
+    ok(msg, { callId })
+    post('symbo:call.started', {
+      callId,
+      number: call.number,
+      from: FROM,
+      externalId: call.externalId,
+      prospectId: call.prospectId,
+    })
+    render()
+
+    const thisCall = call
+    later(400, () => {
+      if (call !== thisCall) return
+      call.status = 'ringing'
+      post('symbo:call.ringing', { callId, number: call.number, from: FROM })
+    })
+    later(1600, () => {
+      if (call !== thisCall) return
+      call.status = 'connected'
+      call.startedAt = Date.now()
+      post('symbo:call.answered', { callId })
+      render()
+    })
+    // Symbo recognising a number it was not told the prospect for.
+    if (!call.prospectId) {
+      later(2000, () => {
+        if (call !== thisCall) return
+        call.prospectId = 'p-1001'
+        post('symbo:contact.matched', {
+          number: call.number,
+          externalId: call.externalId,
+          prospect: { id: 'p-1001', fullName: PROSPECTS['p-1001'].fullName },
+        })
+      })
+    }
+    later(1600 + CONNECTED_CALL_MS, () => {
+      if (call === thisCall) finishOneOffCall('completed')
+    })
+  }
+
   /* -------------------------------------------------------------- commands */
+
+  const OTHER_CALL_MESSAGE = 'Another call is in progress. Resume the session once it has ended.'
+  const DIAL_PENDING_MESSAGE = 'A dial is already being placed.'
 
   const handlers = {
     'symbo:hello'() {
@@ -639,16 +1003,14 @@
 
     'symbo:signOut'(msg) {
       if (!signedIn) return ok(msg, { signedOut: false })
-      if (session) {
-        return refuse(msg, 'SESSION_ACTIVE', 'A power-dial session is running. End it before signing out.')
-      }
-      if (call || incoming) {
-        return refuse(msg, 'CALL_IN_PROGRESS', 'A call is active or ringing. Hang up before signing out.')
-      }
+      const busy = busyRefusal('signing out')
+      if (busy) return refuse(msg, ...busy)
       ok(msg, { signedOut: true })
       // The real frame runs Symbo's logout, which forgets the session at once
       // and reloads it signed out; the reloaded frame is the one that says
-      // auth.required, and the reload restarts the SDK's hello loop.
+      // auth.required, and the reload restarts the SDK's hello loop. Asked
+      // for, so no frame.leaving.
+      leaving = 'signingOut'
       localStorage.removeItem(STORAGE_KEY)
       signedIn = false
       cancelTimers()
@@ -657,15 +1019,13 @@
     },
 
     // Load afresh, for a newer build or to recover. Refused for the same
-    // reasons as signOut; the rep stays signed in.
+    // reasons as signOut, except that compact and hidden mode bring a call
+    // waiting for its outcome back after the reload; the rep stays signed in.
     'symbo:reload'(msg) {
-      if (session) {
-        return refuse(msg, 'SESSION_ACTIVE', 'A power-dial session is running. End it before reloading.')
-      }
-      if (call || incoming) {
-        return refuse(msg, 'CALL_IN_PROGRESS', 'A call is active or ringing. Hang up before reloading.')
-      }
-      ok(msg, { reloading: true })
+      const busy = busyRefusal('reloading', { reloading: true })
+      if (busy) return refuse(msg, ...busy)
+      ok(msg, msg.payload.hard === true ? { reloading: true, hard: true } : { reloading: true })
+      leaving = 'reloading'
       cancelTimers()
       later(300, () => location.reload())
     },
@@ -677,15 +1037,9 @@
     'symbo:dial'(msg) {
       const { number, prospectId, externalId } = msg.payload
       if (!signedIn) return refuse(msg, 'NOT_SIGNED_IN', 'Sign in first.')
-      if (!deviceReady) {
-        return refuse(msg, 'DEVICE_NOT_READY', 'The calling device is still registering.')
-      }
-      if (session) {
-        return refuse(msg, 'SESSION_ACTIVE', 'A power-dial session is active. End it before dialing by hand.')
-      }
-      if (call) {
-        return refuse(msg, 'CALL_IN_PROGRESS', 'A call is already active. Hang up before dialing again.')
-      }
+      if (dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
+      const refusal = dialRefusal()
+      if (refusal) return refuse(msg, ...refusal)
       let target
       if (prospectId) {
         if (!PROSPECTS[prospectId]) {
@@ -699,55 +1053,25 @@
         target = { prospectId: null, number: number.trim() }
       }
 
-      call = {
-        callId: nextId('call'),
-        status: 'dialing',
-        externalId: externalId ?? null,
-        startedAt: null,
-        ...target,
-      }
-      const { callId } = call
-      ok(msg, { callId })
-      post('symbo:call.started', {
-        callId,
-        number: call.number,
-        from: FROM,
-        externalId: call.externalId,
-        prospectId: call.prospectId,
-      })
-      render()
-
-      const thisCall = call
-      later(400, () => {
-        if (call !== thisCall) return
-        call.status = 'ringing'
-        post('symbo:call.ringing', { callId, number: call.number, from: FROM })
-      })
-      later(1600, () => {
-        if (call !== thisCall) return
-        call.status = 'connected'
-        call.startedAt = Date.now()
-        post('symbo:call.answered', { callId })
-        render()
-      })
-      // Symbo recognising a number it was not told the prospect for.
-      if (!call.prospectId) {
-        later(2000, () => {
-          if (call !== thisCall) return
-          call.prospectId = 'p-1001'
-          post('symbo:contact.matched', {
-            number: call.number,
-            externalId: call.externalId,
-            prospect: { id: 'p-1001', fullName: PROSPECTS['p-1001'].fullName },
-          })
-        })
-      }
-      later(1600 + CONNECTED_CALL_MS, () => {
-        if (call === thisCall) finishOneOffCall('completed')
+      if (deviceReady) return placeCall(msg, target, externalId)
+      dialInFlight = true
+      waitForDevice((ready) => {
+        dialInFlight = false
+        if (!ready) {
+          return refuse(msg, 'DEVICE_NOT_READY', 'The calling device did not register in time. Try again, or reload the frame.')
+        }
+        // The rep's state may have moved while we waited.
+        const late = dialRefusal()
+        if (late) return refuse(msg, ...late)
+        placeCall(msg, target, externalId)
       })
     },
 
     'symbo:hangUp'(msg) {
+      if (call) {
+        ok(msg)
+        return finishOneOffCall('hangup')
+      }
       if (session) {
         // The rep hanging up drops the rep's own line with the call.
         if (sessionConnected()) {
@@ -767,11 +1091,8 @@
           render()
           return
         }
-        return refuse(msg, 'NO_ACTIVE_CALL', 'Nothing to hang up.')
       }
-      if (!call) return refuse(msg, 'NO_ACTIVE_CALL', 'Nothing to hang up.')
-      ok(msg)
-      finishOneOffCall('hangup')
+      return refuse(msg, 'NO_ACTIVE_CALL', 'Nothing to hang up.')
     },
 
     'symbo:setContact'(msg) {
@@ -819,10 +1140,42 @@
       )
     },
 
+    // Taken whenever the line is free. With { endCurrent: true } the call in
+    // front of the rep is ended first, Symbo's "End & Accept": a connected
+    // session call goes to its post-call step and the session pauses.
     'symbo:answerIncoming'(msg) {
       if (!incoming) return refuse(msg, 'NO_INCOMING_CALL', 'No call is ringing.')
-      if (call) return refuse(msg, 'CALL_IN_PROGRESS', 'A call is already active.')
-      if (session) return refuse(msg, 'SESSION_ACTIVE', 'A power-dial session is active.')
+      if (session?.status === 'dialing') {
+        return refuse(msg, 'SESSION_ACTIVE', 'A power-dial session is dialing. Pause it before answering.')
+      }
+      const sessionCall = sessionOwnsLine()
+      if (msg.payload.endCurrent !== true) {
+        if (sessionCall) {
+          return refuse(
+            msg,
+            'SESSION_ACTIVE',
+            'A power-dial session call is in front of the rep. Answer with { endCurrent: true } to end it and take this call.'
+          )
+        }
+        if (call) {
+          return refuse(msg, 'CALL_IN_PROGRESS', 'A call is already active. Hang up, or answer with { endCurrent: true }.')
+        }
+      } else {
+        if (sessionCall || (session && sessionLine)) {
+          const connected = sessionConnected()
+          if (connected) hangUpConnectedLeg('completed')
+          if (connected || sessionLine) {
+            dropSessionLine()
+            session.status = 'paused'
+            post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'incoming' })
+          }
+        }
+        // Also with a session call in its post-call step and the line down.
+        if (call) finishOneOffCall('hangup')
+      }
+      // Answering drops a one-off call's unsaved post-call step, as in
+      // Symbo; dialer.saveOutcome({ callId }) can still save it.
+      clearPendingOneOff()
       call = {
         callId: incoming.callId,
         status: 'connected',
@@ -830,6 +1183,7 @@
         number: incoming.from,
         externalId: null,
         startedAt: Date.now(),
+        dialedAt: new Date().toISOString(),
       }
       incoming = null
       ok(msg, { callId: call.callId })
@@ -846,9 +1200,57 @@
       const ignored = incoming
       incoming = null
       ok(msg)
-      post('symbo:call.ended', { callId: ignored.callId, reason: 'ignored', durationSeconds: 0 })
+      post('symbo:call.ended', { callId: ignored.callId, reason: 'cancelled', durationSeconds: 0 })
       render()
       scheduleInbound(INBOUND_REPEAT_MS)
+    },
+
+    // The outcome of a one-off or inbound call: the one waiting in its
+    // post-call step, or any ended call named by id. Only the waiting one
+    // sends call.completed, before the answer, as the real frame sends them.
+    'symbo:call.saveOutcome'(msg) {
+      const { callId, outcomeId, outcomeValue, note, callFields } = msg.payload
+      const pendingCallId = pendingOneOff?.callId ?? null
+      const targetCallId = callId || pendingCallId
+      if (!targetCallId) {
+        return refuse(msg, 'NO_CALL_TO_SAVE', 'There is no call waiting for an outcome. Pass the callId of the call to save.')
+      }
+      if (session && targetCallId === (session.postCall?.callId ?? sessionConnected()?.callId)) {
+        return refuse(msg, 'NO_CALL_TO_SAVE', "This is the power-dial session's call; save it with session.saveOutcome.")
+      }
+      const hasOutcome = !!(outcomeId || outcomeValue)
+      const hasNote = note !== undefined && note !== null
+      if (!hasOutcome && !hasNote && !(callFields && typeof callFields === 'object')) {
+        return refuse(msg, 'OUTCOME_UNKNOWN', 'Send an outcomeId or outcomeValue, a note, or callFields.')
+      }
+      const resolvedId = hasOutcome ? resolveOutcomeId(outcomeId, outcomeValue) : null
+      const outcome = OUTCOMES[resolvedId]
+      if (hasOutcome && !outcome) return refuse(msg, 'OUTCOME_UNKNOWN', `Unknown outcome ${outcomeId || outcomeValue}`)
+      if (outcome?.noteRequired && !note) {
+        return refuse(msg, 'NOTE_REQUIRED', `"${outcome.name}" needs a note.`)
+      }
+      const isPending = targetCallId === pendingCallId
+      // Every one-off post-call step in the stub asks for an outcome.
+      if (isPending && !outcome) return refuse(msg, 'OUTCOME_PENDING', 'An outcome is required for this call.')
+      const target = endedCalls.get(targetCallId)
+      if (!target) return refuse(msg, 'NO_CALL_TO_SAVE', 'Call not found')
+
+      if (isPending) {
+        clearPendingOneOff()
+        post('symbo:call.completed', {
+          callId: target.callId,
+          externalId: target.externalId ?? null,
+          prospectId: target.prospectId,
+          outcomeId: resolvedId,
+          outcome: outcome.name,
+          disposition: outcome.name,
+          dispositionGroup: outcome.group,
+          note: note ?? null,
+          durationSeconds: target.durationSeconds,
+        })
+        render()
+      }
+      ok(msg, { callId: targetCallId, outcomeId: resolvedId ?? null })
     },
 
     'symbo:listAudioDevices'(msg) {
@@ -870,15 +1272,21 @@
       post('symbo:audio.devicesChanged', devices)
     },
 
+    // Not refused while the device registers: like the real frame, the
+    // engine dials once it can.
     'symbo:session.start'(msg) {
       const { dialSessionId, concurrentCalls: lines } = msg.payload
+      const dial = msg.payload.dial !== false
       if (!signedIn) return refuse(msg, 'NOT_SIGNED_IN', 'Sign in first.')
-      if (!deviceReady) return refuse(msg, 'DEVICE_NOT_READY', 'The calling device is still registering.')
       if (warnings.has('REALTIME_DISCONNECTED')) {
         return refuse(msg, 'REALTIME_DISCONNECTED', 'Realtime is disconnected; try again in a moment.')
       }
       if (session) return refuse(msg, 'SESSION_ALREADY_ACTIVE', `Session ${session.dialSessionId} is active.`)
-      if (call) return refuse(msg, 'CALL_IN_PROGRESS', 'A call is active. Hang up before starting a session.')
+      // Loading without dialing leaves the line alone.
+      if (dial && call) return refuse(msg, 'CALL_IN_PROGRESS', 'A call is active. Hang up before starting a session.')
+      if (dial && dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
+      const owed = dial && owedOutcomeRefusal()
+      if (owed) return refuse(msg, ...owed)
       if (!dialSessionId || /missing/i.test(dialSessionId)) {
         return refuse(msg, 'SESSION_NOT_FOUND', `No dial session ${dialSessionId}.`)
       }
@@ -890,52 +1298,94 @@
         if (refusal) return refuse(msg, ...refusal)
       }
       clearTimeout(inboundTimer)
+      const held = heldSessions.get(dialSessionId)
+      heldSessions.delete(dialSessionId)
       // Like the real frame, session.started goes out before the answer.
-      startSession(dialSessionId, lines ?? DEMO_SESSION_LINES)
-      ok(msg, { dialSessionId, concurrentCalls: concurrentCalls() })
+      const dialing = startSession(dialSessionId, lines ?? held?.lines ?? DEMO_SESSION_LINES, {
+        dial,
+        queue: held?.queue,
+      })
+      ok(msg, {
+        dialSessionId,
+        concurrentCalls: concurrentCalls(),
+        concurrentCallsLocked: LOCKED_LINES !== null,
+        dialing,
+      })
     },
 
+    // Hangs up ringing legs (they get the cancelled default outcome) and
+    // drops the rep's line; a connected call is never cut. In the post-call
+    // step the call stays in front until its outcome is saved.
     'symbo:session.pause'(msg) {
       if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
       ok(msg)
-      // Pausing while legs ring hangs them up; they get the cancelled default
-      // outcome. A connected call is never cut by a pause.
       const ringing = sessionRinging()
       ringing.forEach((leg) => endLeg(leg, 'cancelled', 'cancelled'))
       if (!sessionConnected()) dropSessionLine()
-      if (session.status !== 'paused' || ringing.length) {
-        session.status = 'paused'
-        post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'requested' })
-      }
+      session.status = 'paused'
       session.pausedByRequest = true
+      post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'requested' })
       queueUpdated()
       render()
     },
 
     'symbo:session.resume'(msg) {
       if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
-      if (session.postCall) return refuse(msg, 'OUTCOME_PENDING', 'Save an outcome for the last call first.')
       if (warnings.has('REALTIME_DISCONNECTED')) {
         return refuse(msg, 'REALTIME_DISCONNECTED', 'Realtime is disconnected; try again in a moment.')
       }
+      if (session.status === 'dialing') return ok(msg)
+      if (call) return refuse(msg, 'CALL_IN_PROGRESS', OTHER_CALL_MESSAGE)
+      if (dialInFlight) return refuse(msg, 'CALL_IN_PROGRESS', DIAL_PENDING_MESSAGE)
+      const owed = owedOutcomeRefusal()
+      if (owed) return refuse(msg, ...owed)
+      if (sessionConnected()) return refuse(msg, 'CALL_IN_PROGRESS', 'A call is in progress')
+      if (session.postCall) return refuse(msg, 'OUTCOME_PENDING', 'Save an outcome for the last call first.')
       ok(msg)
-      // With a call connected there is nothing to resume yet: the engine
-      // moves on once that call ends and its outcome is saved.
-      if (sessionConnected() || session.status === 'dialing') return
       session.pausedByRequest = false
+      dismissIncoming()
       resumeDialing()
     },
 
+    // Only the session loaded here; the partner's server ends any other.
     'symbo:session.end'(msg) {
+      const { force, dialSessionId } = msg.payload
+      if (dialSessionId !== undefined && dialSessionId !== null && dialSessionId !== session?.dialSessionId) {
+        return refuse(
+          msg,
+          'SESSION_NOT_FOUND',
+          'Only the session loaded here can be ended here; end another session from your server with POST /v1/dialSessions/{id}/actions/end.'
+        )
+      }
       if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
       const connected = sessionConnected()
-      if (connected && !msg.payload.force) {
+      if (connected && !force) {
         return refuse(msg, 'CALL_IN_PROGRESS', 'A call is connected. Pass force: true to end anyway.')
       }
       sessionRinging().forEach((leg) => endLeg(leg, 'cancelled', 'cancelled'))
       if (connected) endLeg(connected, 'completed', 'attempted')
-      ok(msg, { counts: counts() })
+      ok(msg, { dialSessionId: session.dialSessionId, counts: counts() })
       finishSession()
+    },
+
+    // Park the session without ending it: ringing legs are hung up, the
+    // rep's line drops, a call waiting for its outcome is closed without one,
+    // and its cancelled calls go back on the queue, as Symbo's hold does.
+    // session.start picks it up again.
+    'symbo:session.hold'(msg) {
+      if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
+      if (sessionConnected()) {
+        return refuse(msg, 'CALL_IN_PROGRESS', 'A call is connected. Hold the session once it has ended.')
+      }
+      const payload = { dialSessionId: session.dialSessionId, counts: counts() }
+      sessionRinging().forEach((leg) => endLeg(leg, 'cancelled', 'cancelled'))
+      session.queue.forEach((row) => {
+        if (row.status === 'cancelled') row.status = 'queued'
+      })
+      heldSessions.set(session.dialSessionId, { queue: session.queue, lines: session.lines })
+      dropSessionLine()
+      unloadSession('symbo:session.held', payload)
+      ok(msg, payload)
     },
 
     'symbo:session.skipCurrent'(msg) {
@@ -951,16 +1401,41 @@
       render()
     },
 
+    // One queued call (queuedCallId) or a list (queuedCallIds), removed the
+    // way Symbo's bulk remove does, ids in any case: a call being dialed is
+    // left alone, and the list form says how many went and which were skipped.
     'symbo:session.removeQueued'(msg) {
       if (!session) return refuse(msg, 'NO_ACTIVE_SESSION', 'No session is active.')
-      const row = session.queue.find((r) => r.queuedCallId === msg.payload.queuedCallId)
-      if (!row) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', `No queued call ${msg.payload.queuedCallId}.`)
-      if (row.status === 'dialing') {
-        return refuse(msg, 'QUEUED_CALL_DIALING', 'That call is already being dialled.')
+      const { queuedCallId, queuedCallIds } = msg.payload
+      const listForm = Array.isArray(queuedCallIds)
+      let ids
+      if (listForm) {
+        ids = [...new Set(queuedCallIds.filter((id) => typeof id === 'string' && id).map((id) => id.toLowerCase()))]
+        if (!ids.length) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'queuedCallIds is required')
+        if (ids.length > MAX_QUEUED_CALL_IDS) {
+          return refuse(msg, 'QUEUED_CALL_NOT_FOUND', `queuedCallIds takes at most ${MAX_QUEUED_CALL_IDS} ids`)
+        }
+      } else {
+        if (!queuedCallId) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'queuedCallId is required')
+        ids = [String(queuedCallId).toLowerCase()]
+        const row = session.queue.find((r) => r.queuedCallId === ids[0])
+        if (row?.status === 'dialing') return refuse(msg, 'QUEUED_CALL_DIALING', 'This call is being dialed')
+        if (!row) return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'Queued call not found')
+        if (row.status === 'removed') return refuse(msg, 'QUEUED_CALL_NOT_FOUND', 'This call is no longer queued')
       }
-      row.status = 'removed'
-      ok(msg)
-      queueUpdated()
+
+      let removedCount = 0
+      const skipped = []
+      ids.forEach((id) => {
+        const row = session.queue.find((r) => r.queuedCallId === id)
+        if (row?.status === 'dialing') return skipped.push({ queuedCallId: id, reason: 'dialing' })
+        if (!row || row.status === 'removed') return
+        row.status = 'removed'
+        removedCount += 1
+      })
+
+      ok(msg, listForm ? { removedCount, skipped } : {})
+      if (removedCount) queueUpdated()
     },
 
     // Like the real frame, the event goes out before the answer, and only when
@@ -994,11 +1469,7 @@
       if (!postCall || (callId && callId !== postCall.callId)) {
         return refuse(msg, 'NO_CALL_TO_SAVE', 'There is no call waiting for an outcome.')
       }
-      const resolvedId =
-        outcomeId ||
-        Object.keys(OUTCOMES).find(
-          (id) => OUTCOMES[id].name.toLowerCase() === String(outcomeValue || '').toLowerCase()
-        )
+      const resolvedId = resolveOutcomeId(outcomeId, outcomeValue)
       const outcome = OUTCOMES[resolvedId]
       if (!outcome) return refuse(msg, 'OUTCOME_UNKNOWN', `No outcome ${outcomeId || outcomeValue}.`)
       if (outcome.noteRequired && !note) {
@@ -1008,11 +1479,17 @@
       if (then === 'resume' && warnings.has('REALTIME_DISCONNECTED')) {
         return refuse(msg, 'REALTIME_DISCONNECTED', 'Realtime is disconnected; try again in a moment.')
       }
+      if (then === 'resume' && call) return refuse(msg, 'CALL_IN_PROGRESS', OTHER_CALL_MESSAGE)
+      const owed = then === 'resume' && owedOutcomeRefusal()
+      if (owed) return refuse(msg, ...owed)
 
       const row = session.queue.find((r) => r.queuedCallId === postCall.queuedCallId)
       row.status = 'completed'
       row.lastOutcomeId = resolvedId
       session.postCall = null
+      if (JSON.parse(localStorage.getItem(PENDING_CALL_KEY))?.callId === postCall.callId) {
+        localStorage.removeItem(PENDING_CALL_KEY)
+      }
       ok(msg, { callId: postCall.callId, outcomeId: resolvedId })
 
       post('symbo:call.completed', {
@@ -1030,6 +1507,10 @@
 
       if (then === 'end') return finishSession()
       if (then === 'pause') {
+        // The call view's Back: the call leaves the rep's view and the rep's
+        // line drops.
+        dropSessionLine()
+        session.status = 'paused'
         session.pausedByRequest = true
         post('symbo:session.paused', { dialSessionId: session.dialSessionId, reason: 'requested' })
         render()
@@ -1040,14 +1521,16 @@
   }
 
   // Controls for the demo only. Not part of the protocol: the example page
-  // pokes the stub with them to ring an inbound call or break realtime.
+  // pokes the stub with them to ring an inbound call, break realtime, sign
+  // the rep out from another frame, or change the rep's plan.
   const demoHandlers = {
-    'stub:ringInbound': ringInbound,
+    'stub:ringInbound': () => ringInbound(),
     'stub:realtimeBlip': () => {
       raiseWarning('REALTIME_DISCONNECTED', 'Lost the realtime connection; reconnecting…')
       later(3000, () => clearWarning('REALTIME_DISCONNECTED'))
     },
-    'stub:signOut': signOut,
+    'stub:signOut': signedOutElsewhere,
+    'stub:planChanged': () => requireReload('plan_changed'),
   }
 
   addEventListener('message', (e) => {
@@ -1061,6 +1544,13 @@
       parentOrigin = e.origin && e.origin !== 'null' ? e.origin : null
     }
     msg.payload = msg.payload && typeof msg.payload === 'object' ? msg.payload : {}
+
+    if (leaving) {
+      if (msg.type === 'symbo:hello') return
+      if (leaving === 'reloading' && msg.type === 'symbo:reload') return ok(msg, { reloading: true })
+      if (leaving === 'signingOut' && msg.type === 'symbo:signOut') return ok(msg, { signedOut: true })
+      return refuse(msg, 'NOT_SIGNED_IN', leaving === 'reloading' ? 'The frame is reloading.' : 'The rep is being signed out.')
+    }
 
     const handler = handlers[msg.type]
     if (!handler) return refuse(msg, 'UNKNOWN_COMMAND', `Unknown command ${msg.type}.`)
@@ -1086,6 +1576,7 @@
     else if (connected) state = `on call · ${PROSPECTS[connected.prospectId].fullName}`
     else if (session?.status === 'dialing') state = `dialing ${sessionRinging().length} contact(s)…`
     else if (session) state = 'session paused'
+    else if (pendingOneOff) state = 'log the outcome'
     if (muted) state += ' · muted'
     if (warnings.has('REALTIME_DISCONNECTED')) state += ' · realtime down'
 
@@ -1096,10 +1587,10 @@
   }
 
   if (MODE !== 'hidden') {
-    el('ring').addEventListener('click', ringInbound)
+    el('ring').addEventListener('click', () => ringInbound())
     el('blip').addEventListener('click', demoHandlers['stub:realtimeBlip'])
     el('auth').addEventListener('click', () => {
-      if (signedIn) return signOut()
+      if (signedIn) return signOutFromStrip()
       // The strip's own Sign in button: the real one opens the login tab
       // from inside the frame.
       window.open(new URL('../login/', location.href).href, '_blank', 'noopener')

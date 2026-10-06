@@ -404,6 +404,31 @@
           <button class="ghost" id="inbound-ignore">Ignore</button>
         </div>
 
+        <!-- Above the queue, so it is in view when a call ends -->
+        <section class="panel" id="post-call" hidden>
+          <h2>Log call outcome</h2>
+          <div class="call">
+            <div class="who" id="post-call-who"></div>
+            <div class="ref" id="post-call-meta"></div>
+          </div>
+          <div class="row">
+            <label for="post-call-outcome">Outcome</label>
+            <select id="post-call-outcome" class="grow"></select>
+          </div>
+          <div class="row">
+            <textarea id="post-call-note" rows="2" placeholder="Notes"></textarea>
+          </div>
+          <p class="hint" id="post-call-hint" hidden>
+            No call outcomes loaded. Enter your API URL and an API token under
+            Symbo dialer, then press Load outcomes.
+          </p>
+          <div class="actions">
+            <button data-then="resume">Save &amp; dial next</button>
+            <button class="ghost" data-then="pause">Save &amp; pause</button>
+            <button class="ghost" data-then="end">Save &amp; finish</button>
+          </div>
+        </section>
+
         <section class="panel">
           <h2>
             Power dial session
@@ -447,26 +472,6 @@
               </tr>
             </tbody>
           </table>
-        </section>
-
-        <section class="panel" id="post-call" hidden>
-          <h2>Log call outcome</h2>
-          <div class="call">
-            <div class="who" id="post-call-who"></div>
-            <div class="ref" id="post-call-meta"></div>
-          </div>
-          <div class="row">
-            <label for="post-call-outcome">Outcome</label>
-            <select id="post-call-outcome" class="grow"></select>
-          </div>
-          <div class="row">
-            <textarea id="post-call-note" rows="2" placeholder="Notes"></textarea>
-          </div>
-          <div class="actions">
-            <button data-then="resume">Save &amp; dial next</button>
-            <button class="ghost" data-then="pause">Save &amp; pause</button>
-            <button class="ghost" data-then="end">Save &amp; finish</button>
-          </div>
         </section>
 
         <section class="panel">
@@ -553,6 +558,25 @@
             <label for="speaker">Speaker</label>
             <select id="speaker" class="grow" disabled></select>
           </div>
+          <!-- ⚠ Demo only: your server holds the token and lists the outcomes -->
+          <div class="row" id="outcomes-source" hidden>
+            <label for="api-url">Outcomes</label>
+            <input
+              id="api-url"
+              class="mono grow"
+              placeholder="API URL, e.g. https://api.symbo.ai"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <input
+              id="api-token"
+              class="mono grow"
+              type="password"
+              placeholder="API token"
+              autocomplete="off"
+            />
+            <button class="ghost small" id="load-outcomes">Load outcomes</button>
+          </div>
           <div class="row" id="stub-controls" hidden>
             <label>Stub</label>
             <button class="ghost small" id="stub-inbound">Ring inbound</button>
@@ -590,8 +614,9 @@
         { ref: 'case-48240', prospectId: 'p-1006', name: 'Diego Ramos', number: '+17135550131', timeZone: 'America/Chicago' },
       ]
 
-      // Outcomes the partner created in Symbo (GET /v1/callOutcomes, cached).
-      const OUTCOMES = [
+      // The stub's outcomes. Against Symbo the page loads the organization's
+      // own with GET /v1/callOutcomes (see loadOutcomes).
+      const STUB_OUTCOMES = [
         { id: 'o-connected', name: 'Connected' },
         { id: 'o-meeting', name: 'Meeting booked' },
         { id: 'o-callback', name: 'Callback (note required)' },
@@ -615,6 +640,7 @@
       const TOKEN_SERVER = (query.get('tokenServer') || '').replace(/\/+$/, '')
       const ORG_ID = query.get('orgId') || ''
       const IS_STUB = /\/example\/stub$/.test(APP_URL)
+      let outcomes = IS_STUB ? STUB_OUTCOMES : []
       // This page draws its own queue and post-call form, so it asks for the
       // strip by default rather than taking the SDK's 'widget'.
       const MODES = ['widget', 'compact', 'hidden']
@@ -691,6 +717,7 @@
         el('s-start').disabled = !ready || inSession
         el('s-pause').disabled = !inSession
         el('s-resume').disabled = !inSession || inPostCall
+        el('s-resume').title = inPostCall ? 'Save the outcome in Log call outcome first' : ''
         el('s-skip').disabled = !inSession
         el('s-end').disabled = !inSession
         el('hangup').disabled = !ready
@@ -766,15 +793,45 @@
 
       /* -------------------------------------------------------- post-call */
 
-      el('post-call-outcome').innerHTML = OUTCOMES.map((o) => `<option value="${o.id}">${o.name}</option>`).join('')
+      function renderOutcomes() {
+        el('post-call-outcome').replaceChildren(...outcomes.map((o) => new Option(o.name, o.id)))
+        el('post-call-hint').hidden = outcomes.length > 0
+      }
+      renderOutcomes()
+
+      // ⚠ Demo only. Your server lists the outcomes with its token, caches
+      // them, and hands the page what it needs. Outcomes Symbo applies by
+      // itself (system_only) cannot be saved, so they are left out.
+      async function loadOutcomes() {
+        const apiUrl = el('api-url').value.trim().replace(/\/+$/, '')
+        const token = el('api-token').value.trim()
+        if (!apiUrl || !token) return
+        localStorage.setItem('collections-api', JSON.stringify({ apiUrl, token }))
+        try {
+          const res = await fetch(`${apiUrl}/v1/callOutcomes?count=200`, {
+            headers: { authorization: `Bearer ${token}` },
+          })
+          if (!res.ok) throw new Error(`${res.status} loading outcomes`)
+          outcomes = ((await res.json()).data || [])
+            .filter((o) => !o.system_only)
+            .map((o) => ({ id: o.id, name: o.force_call_note ? `${o.name} (note required)` : o.name }))
+          log('GET /v1/callOutcomes', { loaded: outcomes.length }, 'cmd')
+        } catch (err) {
+          log('✗ GET /v1/callOutcomes', { message: err.message }, 'err')
+        }
+        renderOutcomes()
+      }
+      el('load-outcomes').addEventListener('click', loadOutcomes)
 
       function showPostCall(payload) {
         postCall = payload
         const contact = byProspect(payload.prospectId)
-        el('post-call-who').textContent = contact?.name ?? payload.prospectId
+        const row = session?.rows.get(payload.queuedCallId)
+        el('post-call-who').textContent = contact?.name ?? row?.prospectName ?? payload.prospectId
         el('post-call-meta').textContent = `${payload.answered ? 'answered' : 'not answered'} · ${payload.durationSeconds}s · call ${payload.callId}`
         el('post-call-note').value = ''
         el('post-call').hidden = false
+        el('post-call').scrollIntoView({ block: 'nearest' })
         refreshButtons()
       }
 
@@ -801,7 +858,7 @@
             })
           )
           if (!data) return
-          const outcome = OUTCOMES.find((o) => o.id === data.outcomeId)
+          const outcome = outcomes.find((o) => o.id === data.outcomeId)
           setRow(current.queuedCallId, { status: 'completed', label: [`Attempt saved · ${outcome?.name ?? data.outcomeId}`, 'saved'] })
           if (postCall === current) hidePostCall()
         })
@@ -849,8 +906,21 @@
         stopRinging()
       }
 
+      // Answer over a call is refused: SESSION_ACTIVE with a session call in
+      // front of the rep (connected, or in its post-call step), and
+      // CALL_IN_PROGRESS over a one-off or inbound call. Symbo's End & Accept
+      // ends that call and answers: answerIncoming({ endCurrent: true }).
       el('inbound-answer').addEventListener('click', async () => {
-        await run('answerIncoming', dialer.answerIncoming())
+        try {
+          log('→ answerIncoming', await dialer.answerIncoming(), 'cmd')
+        } catch (err) {
+          log(`✗ answerIncoming: ${err.code}`, { message: err.message }, 'err')
+          const onCall = err.code === 'SESSION_ACTIVE' || err.code === 'CALL_IN_PROGRESS'
+          if (!onCall || !dialer.hasCapability('callWaiting') || !incoming) return
+          // It may stop ringing while the prompt is open.
+          if (!confirm('You are on a call. End it and answer this one?') || !incoming) return
+          if (!(await run('answerIncoming { endCurrent: true }', dialer.answerIncoming({ endCurrent: true })))) return
+        }
         hideIncoming()
       })
       el('inbound-ignore').addEventListener('click', async () => {
@@ -962,6 +1032,13 @@
       el('target').textContent = new URL(APP_URL).host
       el('mode').value = mode
       el('stub-controls').hidden = !IS_STUB
+      el('outcomes-source').hidden = IS_STUB
+      if (!IS_STUB) {
+        const saved = JSON.parse(localStorage.getItem('collections-api') || '{}')
+        el('api-url').value = saved.apiUrl || ''
+        el('api-token').value = saved.token || ''
+        loadOutcomes()
+      }
 
       function mount() {
         // create() hands back the client before the frame exists, so the
@@ -1054,17 +1131,18 @@
 
         // ---- one-off and inbound calls end here
         //
-        // A call outside a session has no outcome form in the frame and no
-        // command to save one: this is where a real page would show its own
-        // post-call screen and post the outcome from its server. Nothing
-        // else follows in the page — no call.completed.
+        // A call outside a session has no outcome form in the frame: this is
+        // where a real page would show its own post-call screen and save it
+        // with dialer.saveOutcome({ outcomeId | outcomeValue, note }), which
+        // sends call.completed. A frame without 'saveOutcome' leaves it to
+        // your server (PUT /calls/{id}), and no call.completed follows.
+        // A session's own calls end in session.postCall; one taken while a
+        // session is paused ends here.
         dialer.on('call.postCall', ({ callId, answered, durationSeconds }) => {
-          // A session's calls go through the post-call panel above.
-          if (session) return
-          setStatus(
-            `Call ended · ${answered ? 'answered' : 'no answer'} · ${durationSeconds}s — your server saves the outcome: PUT /calls/${callId}`,
-            'warn'
-          )
+          const save = dialer.hasCapability('saveOutcome')
+            ? 'save its outcome with dialer.saveOutcome()'
+            : `your server saves the outcome: PUT /calls/${callId}`
+          setStatus(`Call ended · ${answered ? 'answered' : 'no answer'} · ${durationSeconds}s — ${save}`, 'warn')
         })
 
         refreshButtons()
