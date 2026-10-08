@@ -6,7 +6,13 @@
  * server.js puts these behind HTTP; test/token-server.test.js checks that what
  * mintToken signs verifies against what publicJwks publishes.
  */
-import { createSign, generateKeyPairSync, randomUUID } from 'node:crypto'
+import {
+  createPrivateKey,
+  createPublicKey,
+  createSign,
+  generateKeyPairSync,
+  randomUUID,
+} from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -40,6 +46,43 @@ export function generateKeys({ kid = randomUUID() } = {}) {
 export function publicJwks(publicKey, kid) {
   const jwk = publicKey.export({ format: 'jwk' }) // { kty, n, e }
   return { keys: [{ ...jwk, use: 'sig', alg: 'RS256', kid }] }
+}
+
+// What makes a JWK private. The JWKS is served to anyone who asks.
+const PRIVATE_JWK_FIELDS = ['d', 'p', 'q', 'dp', 'dq', 'qi']
+
+/**
+ * A keypair someone else made, shaped as generateKeys() returns one, for
+ * saveKeys(): the private key as a PEM (PKCS#8 or PKCS#1), and the JWKS Symbo
+ * was given for it. The pair has to match, or Symbo refuses every token, so
+ * the JWKS entry holding the private key's public half supplies the kid.
+ */
+export function importKeys({ privateKeyPem, jwks }) {
+  let privateKey
+  try {
+    privateKey = createPrivateKey(privateKeyPem)
+  } catch {
+    throw new Error('The private key is not a PEM private key.')
+  }
+  if (privateKey.asymmetricKeyType !== 'rsa')
+    throw new Error('The private key is not an RSA key; tokens are signed RS256.')
+
+  const keys = Array.isArray(jwks?.keys) ? jwks.keys : []
+  if (!keys.length)
+    throw new Error('The public key is not a JWKS: expected { "keys": [ … ] }.')
+  if (keys.some((key) => PRIVATE_JWK_FIELDS.some((field) => field in key)))
+    throw new Error('The JWKS holds private key material. Use the public JWKS.')
+
+  const { n, e } = createPublicKey(privateKey).export({ format: 'jwk' })
+  const match = keys.find((key) => key.n === n && key.e === e)
+  if (!match) throw new Error('The private key matches no key in the JWKS.')
+  if (!match.kid) throw new Error('The matching key in the JWKS has no kid.')
+
+  return {
+    kid: match.kid,
+    privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    jwks: { keys },
+  }
 }
 
 export function saveKeys({ kid, privateKeyPem, jwks }, dir = keysDir()) {

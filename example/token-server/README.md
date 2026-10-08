@@ -65,6 +65,23 @@ ISSUER=https://test.your-app.example npm run token-server
    `tokenServer=http://localhost:8790`, `profileId=<yours>`, and `email` set
    to a rep who already exists in that organization with a calling seat.
 
+## Using a key someone else made
+
+One person makes the key and gives Symbo its JWKS. Everyone else testing
+against that profile signs with the same key rather than making their own:
+
+```bash
+npm run token-server:import -- <private-key.pem> <jwks.json or its https:// URL>
+# or straight from the clipboard, with no file left behind:
+pbpaste | npm run token-server:import -- - <jwks.json or its https:// URL>
+```
+
+It checks the private key matches a key in the JWKS, and takes that key's `kid`
+for the tokens. Then it writes the three files where `generate-keys.js` would,
+so `npm run token-server` picks them up. It won't replace a different key
+already there unless you pass `--force`. Pass the private key on through a
+password manager, not chat or email, and delete any copy once it's imported.
+
 ## Settings
 
 | Env var | Default | |

@@ -1,12 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { spawn } from 'node:child_process'
-import { createPublicKey, createVerify } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { createPrivateKey, createPublicKey, createVerify } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
   generateKeys,
+  importKeys,
+  loadKeys,
   mintToken,
   saveKeys,
 } from '../example/token-server/token.js'
@@ -149,5 +152,128 @@ describe('the example token server over HTTP', () => {
   it('refuses a request with no email', async () => {
     const res = await fetch(`${base}/symbo-token`, { method: 'POST', body: '{}' })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('importing a key someone else made', () => {
+  const keys = generateKeys()
+  const other = generateKeys()
+
+  it('takes the kid from the JWKS entry the private key matches', () => {
+    const imported = importKeys({
+      privateKeyPem: keys.privateKeyPem,
+      jwks: { keys: [...other.jwks.keys, ...keys.jwks.keys] },
+    })
+    expect(imported.kid).toBe(keys.kid)
+    const { token } = mintWith(imported)
+    expect(verifyAgainstJwks(token, imported.jwks).ok).toBe(true)
+  })
+
+  it('accepts a PKCS#1 private key and keeps it as PKCS#8', () => {
+    const pkcs1 = createPrivateKey(keys.privateKeyPem).export({ type: 'pkcs1', format: 'pem' })
+    expect(pkcs1).toContain('BEGIN RSA PRIVATE KEY')
+    const imported = importKeys({ privateKeyPem: pkcs1, jwks: keys.jwks })
+    expect(imported.privateKeyPem).toContain('BEGIN PRIVATE KEY')
+  })
+
+  it('refuses a private key the JWKS does not hold', () => {
+    expect(() => importKeys({ privateKeyPem: other.privateKeyPem, jwks: keys.jwks })).toThrow(
+      /matches no key/
+    )
+  })
+
+  it('refuses a JWKS with private key material, which the server would publish', () => {
+    const privateJwk = createPrivateKey(keys.privateKeyPem).export({ format: 'jwk' })
+    const jwks = { keys: [{ ...privateJwk, kid: keys.kid }] }
+    expect(() => importKeys({ privateKeyPem: keys.privateKeyPem, jwks })).toThrow(
+      /private key material/
+    )
+  })
+
+  it('refuses what is not a PEM private key or not a JWKS', () => {
+    expect(() => importKeys({ privateKeyPem: 'nope', jwks: keys.jwks })).toThrow(/not a PEM/)
+    expect(() => importKeys({ privateKeyPem: keys.privateKeyPem, jwks: {} })).toThrow(
+      /not a JWKS/
+    )
+  })
+})
+
+describe('import-keys.js', () => {
+  let src
+  let dir
+  const keys = generateKeys()
+
+  const run = (args, { input } = {}) =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, ['example/token-server/import-keys.js', ...args], {
+        env: { ...process.env, KEYS_DIR: dir },
+        stdio: 'pipe',
+      })
+      let out = ''
+      child.stdout.on('data', (d) => (out += d))
+      child.stderr.on('data', (d) => (out += d))
+      child.on('exit', (code) => resolve({ code, out }))
+      child.stdin.end(input)
+    })
+
+  beforeAll(() => {
+    src = mkdtempSync(join(tmpdir(), 'symbo-key-sent-'))
+    writeFileSync(join(src, 'private.pem'), keys.privateKeyPem)
+    writeFileSync(join(src, 'jwks.json'), JSON.stringify(keys.jwks))
+  })
+
+  afterAll(() => rmSync(src, { recursive: true, force: true }))
+
+  beforeEach(() => {
+    dir = join(mkdtempSync(join(tmpdir(), 'symbo-token-server-')), 'keys')
+  })
+
+  it('puts the files where the token server reads them', async () => {
+    const { code, out } = await run([join(src, 'private.pem'), join(src, 'jwks.json')])
+    expect(code).toBe(0)
+    expect(out).toContain(`kid ${keys.kid}`)
+    const loaded = loadKeys(dir)
+    expect(loaded.kid).toBe(keys.kid)
+    expect(loaded.jwks).toEqual(keys.jwks)
+    expect(verifyAgainstJwks(mintWith(loaded).token, loaded.jwks).ok).toBe(true)
+  })
+
+  it('reads the private key from stdin and the JWKS from its URL', async () => {
+    const server = createServer((req, res) => res.end(JSON.stringify(keys.jwks)))
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const url = `http://127.0.0.1:${server.address().port}/develop-embed-public-key`
+      const { code } = await run(['-', url], { input: keys.privateKeyPem })
+      expect(code).toBe(0)
+      expect(loadKeys(dir).kid).toBe(keys.kid)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('will not replace a different key without --force, but re-imports the same one', async () => {
+    const mine = generateKeys()
+    saveKeys(mine, dir)
+
+    const refused = await run([join(src, 'private.pem'), join(src, 'jwks.json')])
+    expect(refused.code).toBe(1)
+    expect(refused.out).toContain('A different key is already in')
+    expect(readFileSync(join(dir, 'kid.txt'), 'utf8')).toBe(mine.kid)
+
+    const forced = await run([join(src, 'private.pem'), join(src, 'jwks.json'), '--force'])
+    expect(forced.code).toBe(0)
+    expect(loadKeys(dir).kid).toBe(keys.kid)
+
+    const again = await run([join(src, 'private.pem'), join(src, 'jwks.json')])
+    expect(again.code).toBe(0)
+  })
+
+  it('refuses a private key that does not match the JWKS, and writes nothing', async () => {
+    const stranger = generateKeys()
+    writeFileSync(join(src, 'stranger.pem'), stranger.privateKeyPem)
+    const { code, out } = await run([join(src, 'stranger.pem'), join(src, 'jwks.json')])
+    expect(code).toBe(1)
+    expect(out).toContain('matches no key')
+    expect(loadKeys(dir)).toBeNull()
   })
 })

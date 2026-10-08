@@ -39,6 +39,7 @@
     "serve": "npx --yes http-server -p 3000 -c-1 -o /example/",
     "token-server": "node example/token-server/server.js",
     "token-server:keys": "node example/token-server/generate-keys.js",
+    "token-server:import": "node example/token-server/import-keys.js",
     "test": "vitest run",
     "diagrams": "node docs/diagrams/build.mjs",
     "prepublishOnly": "npm run build && npm test"
