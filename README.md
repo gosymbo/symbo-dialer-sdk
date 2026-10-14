@@ -454,6 +454,13 @@ device, and after about 15 s for one that rings for a long time. Either way
 `call.started`, `call.ringing` and `call.ended` carry the id once it is known,
 so key your record off the events rather than off this resolution alone.
 
+Symbo can also refuse a call before anything is dialed, when the rep's login
+is already on a call somewhere else: another browser, tab or device. Then
+`call.started` is followed by `call.ended { reason: 'on_call_elsewhere' }`,
+with no `call.postCall` because there is no call to log, and `dial()` resolves
+with a `callId` of `null`. In hidden mode nothing on screen tells the rep why,
+so tell them yourself.
+
 Events: `call.started` → `call.ringing` → `call.answered` (far-end pickup) →
 `call.ended { reason, durationSeconds }` → `call.postCall`. Compact and hidden
 mode show no outcome form (widget mode shows Symbo's own), so render your own
@@ -632,6 +639,15 @@ call still needs its outcome ([One-off calls](#one-off-calls)). The result and
 was already empty, which `session.noMoreCalls` has said, or when a call or a
 `dial()` came up while the session was loading: it is then loaded and paused,
 as with `dial: false` below, for `session.resume()` once the line is free.
+
+Symbo can also refuse to bring the rep's line up when their login is already
+on a call somewhere else: another browser, tab or device. By then
+`session.start()` has resolved and `session.started` has said
+`dialing: true`. A few seconds later,
+`session.paused { reason: 'on_call_elsewhere' }` arrives. Nothing was dialed,
+and the session stays loaded and paused, for `session.resume()` once the other
+call is over. A `session.resume()` can be refused the same way:
+`session.resumed`, then `session.paused { reason: 'on_call_elsewhere' }`.
 
 Pass `dial: false` to load the session without dialing, as Symbo itself opens
 one on page load: it comes off hold and reads `paused`
@@ -1080,14 +1096,14 @@ only listed for a rep with power dialing.
 | `call.ringing` | `{ callId, number, from }` |
 | `call.incoming` | `{ callId, from, prospectId, prospectName }` |
 | `call.answered` | `{ callId }` — the far end picked up |
-| `call.ended` | `{ callId, reason, durationSeconds }` — also for every `call.incoming` that stops ringing, with or without a session loaded |
+| `call.ended` | `{ callId, reason, durationSeconds }` — also for every `call.incoming` that stops ringing, with or without a session loaded. `reason` is `on_call_elsewhere` when Symbo dialed nothing because the rep's login was already on a call somewhere else ([One-off calls](#one-off-calls)) |
 | `call.postCall` | `{ callId, prospectId, answered, durationSeconds, outcomeRequired, blocksDialing, restored, dialedAt }` — `blocksDialing` under "Require & block dialer"; `restored` (with `dialedAt`, else `null`) when a reload brought the call back |
 | `call.completed` | `{ callId, externalId, prospectId, outcomeId, outcome, disposition, dispositionGroup, note, durationSeconds }` — after a save through `session.saveOutcome`, or through `saveOutcome()` of the call waiting in its post-call step. A write from your server does not produce it |
 | `call.muteChanged` | `{ muted }` — the rep's microphone was muted or unmuted: through `setMuted()`, Symbo's own button in widget mode, or the rep's line dropping while muted (the call ending; in a session, the rep hanging up, pausing or holding, the queue running out, the session ending; a frame reload). See [Mute and keypad](#mute-and-keypad) |
 | `contact.matched` | `{ number, externalId, prospect: { id, fullName } }` |
 | `audio.devicesChanged` | same shape as `audio.list()` |
 | `session.started` | `{ dialSessionId, concurrentCalls, concurrentCallsLocked, dialing }` — `dialing` is false for `session.start({ dial: false })`, when the queue was already empty (`session.noMoreCalls` has said so), and when a call or a `dial()` came up while the session was loading (it stays loaded and paused) |
-| `session.paused` | `{ dialSessionId, reason: 'connected' \| 'requested' \| 'incoming' }` — `incoming` when `answerIncoming({ endCurrent: true })` dropped the session's line |
+| `session.paused` | `{ dialSessionId, reason: 'connected' \| 'requested' \| 'incoming' \| 'on_call_elsewhere' }` — `incoming` when `answerIncoming({ endCurrent: true })` dropped the session's line; `on_call_elsewhere` when Symbo would not bring the rep's line up because their login was already on a call somewhere else ([2. The page starts it](#2-the-page-starts-it)) |
 | `session.resumed` | `{ dialSessionId }` — when the engine dials on. A resume that already knows the queue is empty sends `session.noMoreCalls` instead; one that finds it empty on the next fetch sends `session.noMoreCalls` right after |
 | `session.ended` / `session.held` | `{ dialSessionId, counts }` — the session ended / was parked with `session.hold()` |
 | `session.noMoreCalls` | `{ dialSessionId, counts, sessionOpen: true }` — the queue ran out; the session stays loaded and paused until it is ended or held |
@@ -1183,6 +1199,10 @@ be right in advance.
 - **Reloads.** Show `frame.leaving` and `reload.required` to the rep: in
   hidden mode they are the only sign the frame is about to go. Keep the
   iframe where `mount()` put it; moving it in the DOM reloads it.
+- **A login already on a call.** Tell the rep when a call or a session's
+  line is refused because their login is on a call somewhere else:
+  `call.ended` or `session.paused` with `reason: 'on_call_elsewhere'` is the
+  only sign of it.
 - **Chrome.** The embedded dialer is supported in Chrome. Other browsers are
   not covered.
 - **Allowed origins.** Give Symbo every origin that embeds the dialer, test
